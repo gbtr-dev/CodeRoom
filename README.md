@@ -22,8 +22,10 @@ Real-time collaborative development environment. Multiple users can write code t
 - Auto-detected from file extension, zero config, no external dependencies
 
 ### Code execution
-- Run JavaScript (Node) and Python directly inside the room
-- Output streams in real time to every participant through the integrated terminal panel
+- Run code in 19 languages directly from the room via Docker-isolated containers
+- Each language runs in its own official Docker image with `--network none`, memory cap and read-only filesystem
+- Supported: JS, JSX, TS, TSX, Python, Go, Java, C, C++, Rust, C#, Ruby, PHP, Perl, Lua, Shell, Swift, Kotlin, R
+- Output appears in the integrated terminal panel
 
 ### Import & Export
 - Drop a ZIP to import an entire project — restores the full folder structure
@@ -107,7 +109,7 @@ Coderoom/
 │   │   ├── socket.ts         # All WebSocket events: join, code sync, cursors, chat, knock, roles, file tree
 │   │   ├── db.ts             # SQLite schema, prepared statements, exported functions (no ORM)
 │   │   ├── rooms.ts          # In-memory room state (participants, files)
-│   │   ├── executor.ts       # Code execution (JS/Python sandboxed)
+│   │   ├── executor.ts       # Code execution (Docker sandbox, 19 languages)
 │   │   ├── csrf.ts           # CSRF protection via Origin/Referer check
 │   │   ├── rateLimiter.ts    # Rate limiting for socket events
 │   │   ├── authRateLimiter.ts# Rate limiting for auth routes (anti brute-force)
@@ -192,7 +194,7 @@ CORS_ORIGIN=
 
 ## Installation & setup
 
-**Prerequisites:** Node.js 18+ and Python 3 (for Python code execution inside rooms).
+**Prerequisites:** Node.js 18+ and Docker Desktop (for code execution inside rooms).
 
 ### 01 — Clone the repository
 ```bash
