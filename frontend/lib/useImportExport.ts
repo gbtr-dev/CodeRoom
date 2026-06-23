@@ -79,8 +79,12 @@ export function useImportExport({
     kind: "file" | "folder",
     content?: string,
   ): Promise<{ id: string; name: string; type: "file" | "folder"; content?: string }> {
-    return new Promise((resolve) => {
-      socketRef.current?.emit("create-file", { parentId, name, type: kind, content }, (node: any) => resolve(node))
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`File creation timed out: ${name}`)), 15_000)
+      socketRef.current?.emit("create-file", { parentId, name, type: kind, content }, (node: any) => {
+        clearTimeout(timer)
+        resolve(node)
+      })
     })
   }
 
@@ -148,6 +152,8 @@ export function useImportExport({
         if (!firstId) firstId = node.id
       }
       if (firstId) openFile(firstId)
+    } catch (err) {
+      console.error("[import] File import failed:", err)
     } finally {
       importingRef.current = false
       setImporting(false)
@@ -221,8 +227,10 @@ export function useImportExport({
       if (entries.length === 0) return
 
       // Single round-trip: send everything at once
-      await new Promise<void>((resolve) => {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("ZIP import timed out")), 30_000)
         socketRef.current?.emit("import-zip", { entries }, (idMap: Record<string, string>) => {
+          clearTimeout(timer)
           // files-imported event already updated nodes for all clients;
           // just open the first file for the importer
           if (firstFileTempId) {
@@ -232,6 +240,8 @@ export function useImportExport({
           resolve()
         })
       })
+    } catch (err) {
+      console.error("[import] ZIP import failed:", err)
     } finally {
       importingRef.current = false
       setImporting(false)

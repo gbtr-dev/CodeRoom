@@ -138,14 +138,23 @@ export function getRoomFiles(roomId: string): FileNode[] {
     }
   }
   room.cacheLoaded = true
-  return rows.map((row) => ({
-    id: row.id,
-    name: row.name,
-    type: row.kind,
-    content: row.kind === 'file' ? (room.fileContent.get(row.id) ?? row.content) : undefined,
-    language: getLangFromName(row.name),
-    parentId: row.parent_id,
-  })) as any
+  // Guard against orphaned nodes: if a row's parent_id doesn't point to
+  // another node in this room, re-parent it to 'root' so client rendering
+  // never encounters a missing parent.
+  const validIds = new Set(rows.map(r => r.id))
+  return rows.map((row) => {
+    const parentId = row.parent_id && row.parent_id !== 'root' && !validIds.has(row.parent_id)
+      ? 'root'
+      : row.parent_id
+    return {
+      id: row.id,
+      name: row.name,
+      type: row.kind,
+      content: row.kind === 'file' ? (room.fileContent.get(row.id) ?? row.content) : undefined,
+      language: getLangFromName(row.name),
+      parentId,
+    }
+  }) as any
 }
 
 export function getFileContent(roomId: string, fileId: string): string {
