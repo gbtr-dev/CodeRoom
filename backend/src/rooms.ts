@@ -138,9 +138,7 @@ export function getRoomFiles(roomId: string): FileNode[] {
     }
   }
   room.cacheLoaded = true
-  // Guard against orphaned nodes: if a row's parent_id doesn't point to
-  // another node in this room, re-parent it to 'root' so client rendering
-  // never encounters a missing parent.
+
   const validIds = new Set(rows.map(r => r.id))
   return rows.map((row) => {
     const parentId = row.parent_id && row.parent_id !== 'root' && !validIds.has(row.parent_id)
@@ -180,14 +178,7 @@ export function removeParticipant(roomId: string, socketId: string) {
   }
 }
 
-/**
- * Restituisce true se il file appartiene davvero a roomId e l'update è
- * stato applicato. `room.fileContent` è popolato solo con i file (non le
- * cartelle) effettivamente caricati per QUESTA room — quindi un fileId
- * sconosciuto al momento del check (perché appartiene a un'altra room, o
- * è una cartella, o non esiste) viene scartato qui, prima ancora di
- * toccare il DB.
- */
+
 export function updateFileContent(roomId: string, fileId: string, content: string): boolean {
   const room = getOrCreateRoom(roomId)
   ensureCacheLoaded(room)

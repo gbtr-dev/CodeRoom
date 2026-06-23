@@ -12,8 +12,6 @@ const MAX_ATTEMPTS = 5
 const WINDOW_S = 5 * 60   // 5 minuti
 const LOCK_S   = 10 * 60  // 10 minuti
 
-// Pulizia periodica: rimuove le righe con finestra scaduta e non bloccate.
-// Sopravvive ai riavvii perché i dati sono su SQLite.
 setInterval(() => {
   dbDeleteExpiredLoginAttempts()
 }, 10 * 60 * 1000).unref()

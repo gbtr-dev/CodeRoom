@@ -76,8 +76,6 @@ export default function CoderoomPage() {
   const [activeId, setActiveId] = useState<string>("")
   const [dirty, setDirty] = useState<Set<string>>(new Set())
 
-  // Fix 2: contenuto del file attivo separato da `nodes`.
-  // onCodeChange aggiorna solo questo stato, la sidebar non viene ridisegnata ad ogni tasto.
   const [activeContent, setActiveContent] = useState<string>("")
   const [editingName, setEditingName] = useState(false)
   const [nameInput, setNameInput] = useState("")
@@ -118,30 +116,18 @@ export default function CoderoomPage() {
   const [searchQuery, setSearchQuery] = useState("")
   const [searchIndex, setSearchIndex] = useState(0)
   const searchInputRef = useRef<HTMLInputElement>(null)
-  // Fix 3: altezza visibile dell'area editor, usata per virtualizzare il gutter
-  // (renderizzare solo le righe effettivamente in vista invece di tutto il file).
+
   const [editorViewportHeight, setEditorViewportHeight] = useState(0)
 
   const draggingRef = useRef(false)
   const importingRef = useRef(false)
-  // Fix 2: ref per leggere activeId dentro closure socket senza stale reference
+
   const activeIdRef = useRef(activeId)
   useEffect(() => { activeIdRef.current = activeId }, [activeId])
   const containerRef = useRef<HTMLDivElement>(null)
   const editorViewportRef = useRef<HTMLDivElement | null>(null)
   const editorViewportRO = useRef<ResizeObserver | null>(null)
-  // Fix 4: callback ref invece di useRef + useEffect([]) — il div dell'editor
-  // viene montato/smontato ogni volta che si passa da "nessun file aperto" a
-  // un file attivo (vedi il ternario `{activeNode ? ... : ...}` nel JSX). Con
-  // un useEffect a dipendenze vuote, il ResizeObserver veniva creato una sola
-  // volta al mount del componente: se in quel momento non c'era ancora un
-  // file attivo (caso comune, perché i file arrivano dal socket dopo il mount),
-  // editorViewportRef.current era null, l'effect usciva subito e l'observer
-  // non veniva mai (ri)creato. Risultato: editorViewportHeight restava 0 per
-  // sempre, il gutter restava bloccato nel ramo "stima" (~prime 40-50 righe,
-  // sempre dall'inizio) e le righe successive non venivano più numerate,
-  // a prescindere dallo scroll. La callback ref si riattacca ogni volta che
-  // l'elemento DOM compare o cambia, quindi funziona anche in questo caso.
+
   const setEditorViewportRef = useCallback((el: HTMLDivElement | null) => {
     editorViewportRef.current = el
     if (editorViewportRO.current) {
@@ -221,18 +207,12 @@ export default function CoderoomPage() {
   const isOwner = myRole === "owner"
 
   const activeNode = nodes.find((n) => n.id === activeId && n.kind === "file")
-  // Fix 2: usa activeContent invece di activeNode.content per evitare che
-  // ogni keystroke rilegga contenuto da nodes (e causi ri-render della sidebar)
+
   const code = activeContent
   const lang: Lang = activeNode ? getLang(activeNode.name) : "md"
   const lineCount = code.split("\n").length
   const remoteCursors = participants.filter((p) => p.fileId === activeId)
 
-  // Fix 1: memoizza l'highlighting — ricalcola solo quando code o lang cambiano,
-  // non ad ogni render causato da socket, cursori, ecc.
-  // Inoltre highlightCode ora riusa l'output delle righe non modificate (vedi
-  // sopra), quindi su un file lungo una singola pressione di tasto ricalcola
-  // solo la riga toccata invece di ritokenizzare tutto il file da capo.
   const highlightedCode = useMemo(() => {
     const prevCache = activeId ? highlightCacheRef.current[activeId] : undefined
     const { html, cache } = highlightCode(code, lang, prevCache)
@@ -274,15 +254,6 @@ export default function CoderoomPage() {
     })
   }, [searchMatches, searchIndex, searchOpen, scroll, code])
 
-  // Fix 3: misura l'altezza visibile dell'editor per sapere quante righe
-  // del gutter servono effettivamente a schermo (virtualizzazione).
-  // La misurazione vera e propria ora avviene in setEditorViewportRef sopra.
-
-  // Fix 3: range di righe del gutter da renderizzare, con un piccolo overscan
-  // sopra/sotto per evitare flash bianchi durante lo scroll veloce.
-  // Invece di Array.from({ length: lineCount }) (un nodo DOM per ogni riga
-  // del file, ricostruito ad ogni render), calcoliamo solo le righe visibili
-  // a partire da scroll.top e dall'altezza del viewport.
   const gutterRange = useMemo(() => {
     const estimatedVisible = editorViewportHeight > 0
       ? Math.ceil(editorViewportHeight / LINE_HEIGHT)
@@ -293,13 +264,11 @@ export default function CoderoomPage() {
     return { start, end }
   }, [scroll.top, editorViewportHeight, lineCount])
 
-  // Fix 2: quando l'utente cambia file, carica il contenuto in activeContent
   useEffect(() => {
     const node = nodes.find((n) => n.id === activeId && n.kind === "file")
     const content = node?.content ?? ""
     setActiveContent(content)
     if (activeId) lastSyncedContent.current[activeId] = content
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId])
 
   function flushCodeSync() {
@@ -356,26 +325,16 @@ export default function CoderoomPage() {
 
   useEffect(() => {
     setSearchIndex(0)
-    // Non rubiamo il focus mentre l'utente sta ancora digitando nella search bar.
-    // Le highlight gialle si aggiornano automaticamente; ci si sposta al match
-    // solo quando l'utente preme Enter o i bottoni di navigazione.
+
   }, [searchMatches])
 
   useEffect(() => {
     if (searchOpen) setTimeout(() => searchInputRef.current?.select(), 30)
   }, [searchOpen])
 
-  // La connessione Socket.IO e tutti i suoi event handler (join, room-state,
-  // sync del codice, run, file tree, knock, partecipanti) sono stati estratti
-  // in lib/useSocket.ts — vedi la chiamata a useSocket() più sopra.
-
   /* ------------------------------------------------------------------ */
   /* File system helpers                                                 */
   /* ------------------------------------------------------------------ */
-  // Le mutazioni del file tree (toggle, create, rename, delete, move) sono
-  // state estratte in lib/useFileTree.ts — vedi la chiamata a useFileTree()
-  // più sotto. Qui restano solo nodeName/openFile/closeTab, che riguardano
-  // tab e selezione del file attivo, non il file tree in sé.
 
   function nodeName(id: string) {
     return nodes.find((n) => n.id === id)?.name ?? "—"
@@ -446,8 +405,6 @@ export default function CoderoomPage() {
     openFile: (id: string) => openFile(id),
   })
 
-  // L'hook è agnostico riguardo al menu "+" della sidebar — chiuderlo prima
-  // di apire il file picker resta una responsabilità della UI del file tree.
   function exportActiveFile() {
     exportActiveFileFn(activeNode)
   }
@@ -477,8 +434,7 @@ export default function CoderoomPage() {
       highlightRef.current.scrollTop = ta.scrollTop
       highlightRef.current.scrollLeft = ta.scrollLeft
     }
-    // Fix 3: il gutter è virtualizzato e non scrolla più nativamente —
-    // la sua posizione è derivata da `scroll.top` (vedi gutterRange / style top).
+
     setScroll({ top: ta.scrollTop, left: ta.scrollLeft })
     saveViewState()
   }
@@ -527,7 +483,7 @@ export default function CoderoomPage() {
 
   function onCodeChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
     const value = e.target.value
-    // Fix 2: aggiorna solo activeContent (non nodes) — la sidebar non si ridisegna
+
     setActiveContent(value)
     setDirty((prev) => {
       const next = new Set(prev)
@@ -750,7 +706,6 @@ export default function CoderoomPage() {
   }
 
   function applyValue(value: string) {
-    // Fix 2: aggiorna solo activeContent (non nodes) — la sidebar non si ridisegna
     setActiveContent(value)
     setDirty((prev) => {
       const next = new Set(prev)
@@ -772,8 +727,7 @@ export default function CoderoomPage() {
       highlightRef.current.scrollTop = vs.top
       highlightRef.current.scrollLeft = vs.left
     }
-    // Fix 3: niente gutterRef.current.scrollTop — il gutter virtualizzato
-    // si riposiziona da solo tramite scroll.top nello style del wrapper interno.
+
     setScroll({ top: vs.top, left: vs.left })
     setActiveLine(ta.value.slice(0, vs.sel).split("\n").length)
   }, [activeId])

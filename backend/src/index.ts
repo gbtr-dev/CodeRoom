@@ -24,33 +24,19 @@ app.register(cors, {
   credentials: true,
 })
 
-// Necessario per leggere/scrivere il cookie httpOnly di sessione
-// (req.cookies, reply.setCookie, reply.clearCookie) usato da auth.ts.
+
 app.register(cookie)
 
-// Difesa in profondità contro CSRF, oltre a SameSite=lax sul cookie di
-// sessione: rifiuta le richieste mutanti (POST/PUT/PATCH/DELETE) la cui
-// Origin (o, in fallback, Referer) non corrisponde al frontend configurato.
-// Vedi csrf.ts per i dettagli del perché GET/HEAD/OPTIONS non sono toccate
-// e perché l'assenza di entrambi gli header non blocca la richiesta.
+
 app.addHook('preHandler', csrfOriginCheck(CORS_ORIGIN))
 
-// Rate limiting globale: il default è volutamente permissivo (non vogliamo
-// throttlare le rotte autenticate, già protette da sessione). Le rotte
-// sensibili a brute force (/auth/login, /auth/signup) impostano un limite
-// più stretto via `config.rateLimit` direttamente sulla route — vedi auth.ts.
 app.register(rateLimit, {
   global: false,
   max: 1000,
   timeWindow: '1 minute',
 })
 
-// Pulizia delle sessioni scadute: una passata subito all'avvio (utile se il
-// server resta fermo a lungo tra un riavvio e l'altro) più una periodica ogni
-// 6 ore per i processi long-running, altrimenti la tabella `sessions`
-// crescerebbe senza limiti man mano che i token scadono senza mai essere
-// rimossi. `.unref()` evita che questo timer da solo mantenga il processo
-// vivo e blocchi lo shutdown pulito gestito da SIGINT/SIGTERM più sotto.
+
 const SESSION_CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000 // 6 ore
 
 dbDeleteExpiredSessions()
@@ -95,8 +81,6 @@ async function shutdown(signal: string) {
     log.error('Errore durante la chiusura del server', { error: String(err) })
   }
 
-  // better-sqlite3 is synchronous: flushAllRoomContent() writes every dirty
-  // file to SQLite before returning, so no further awaiting is needed.
   log.info('Flush contenuti su DB…')
   flushAllRoomContent()
   log.info('Flush completato, uscita.')
@@ -118,7 +102,6 @@ app.listen({ port: 3001, host: '127.0.0.1' }, (err) => {
       methods: ['GET', 'POST'],
       credentials: true,
     },
-    // Compress WebSocket frames larger than 1 KB (code-update, room-state, etc.)
     perMessageDeflate: { threshold: 1024 },
   })
 

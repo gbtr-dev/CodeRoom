@@ -9,11 +9,8 @@ type ExecResult = { output: string; error: string; exitCode: number; duration: n
 type LangConfig = {
   image: string
   filename: string
-  // Command executed inside the container (use ['sh','-c','...'] for multi-step)
   cmd: string[]
-  // Extra -e KEY=VALUE pairs needed by some runtimes
   extraEnv?: string[]
-  // Compiled languages need more time (compilation + link + run)
   timeoutMs?: number
 }
 
@@ -27,7 +24,6 @@ const LANG_CONFIGS: Record<string, LangConfig> = {
   // ── JavaScript / TypeScript ───────────────────────────────────────────────
   js:  { image: 'node:22-alpine', filename: 'index.js',  cmd: ['node', 'index.js'] },
   jsx: { image: 'node:22-alpine', filename: 'index.jsx', cmd: ['node', 'index.jsx'] },
-  // Node 22 ships --experimental-strip-types: runs plain TS without tsx/ts-node
   ts:  { image: 'node:22-alpine', filename: 'index.ts',  cmd: ['node', '--experimental-strip-types', 'index.ts'] },
   tsx: { image: 'node:22-alpine', filename: 'index.tsx', cmd: ['node', '--experimental-strip-types', 'index.tsx'] },
 
@@ -45,7 +41,6 @@ const LANG_CONFIGS: Record<string, LangConfig> = {
   },
 
   // ── JVM ──────────────────────────────────────────────────────────────────
-  // JEP 330 (JDK 11+): `java SourceFile.java` compiles + runs in one step
   java: {
     image: 'openjdk:21-slim',
     filename: 'Main.java',

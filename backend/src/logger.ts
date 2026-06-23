@@ -10,7 +10,6 @@ function timestamp(): string {
   return new Date().toISOString().replace('T', ' ').slice(0, 19)
 }
 
-/** Serializza coppie key-value opzionali in fondo alla riga */
 function kv(fields?: Record<string, unknown>): string {
   if (!fields || Object.keys(fields).length === 0) return ''
   return (
@@ -38,7 +37,6 @@ export function maskEmail(email: string): string {
   return `${email[0]}***@${email.slice(at + 1)}`
 }
 
-/** Crea un logger con modulo fisso — usalo dentro ogni file con createLogger('MODULO') */
 export function createLogger(module: string) {
   return {
     debug: (msg: string, fields?: Record<string, unknown>) => write('debug', module, msg, fields),

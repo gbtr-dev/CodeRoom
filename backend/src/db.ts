@@ -400,9 +400,6 @@ export function dbDeleteFile(fileIdOrIds: string | string[], roomId: string) {
   return info.changes > 0
 }
 
-// Atomically collect all descendant IDs and delete the whole subtree in a
-// single transaction so no concurrent operation can interleave between the
-// read and the delete.
 export const dbDeleteFileTreeTx = db.transaction((fileId: string, roomId: string): string[] => {
   const rows = stmtGetDescendants.all(fileId, roomId) as { id: string }[]
   if (rows.length === 0) return []

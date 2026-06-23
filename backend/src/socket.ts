@@ -65,18 +65,12 @@ export function notifyRoomDeleted(roomId: string) {
   removeRoom(roomId)
 }
 
-// Chiamata dalla route REST /auth/rooms/:id/leave: se l'utente ha la room
-// aperta in una o più tab/finestre in questo momento, le disconnette da
-// quella room — stesso comportamento di un kick, per evitare che resti
-// "dentro" una room di cui non è più membro lato DB.
 export function notifyUserLeftRoom(roomId: string, userId: string) {
   for (const targetSocket of getUserSockets(roomId, userId)) {
     targetSocket.disconnect(true)
   }
 }
 
-// Called on logout or account deletion: immediately disconnects every socket
-// the user has open across all rooms so a revoked session can't keep editing.
 export function disconnectAllUserSockets(userId: string) {
   const suffix = `:${userId}`
   for (const [key, sockets] of userRoomSockets.entries()) {
@@ -88,10 +82,6 @@ export function disconnectAllUserSockets(userId: string) {
   }
 }
 
-// pending knock: socket id → { userId, userName }
-// Shared across ALL connections (module scope) so that the owner's
-// approve-knock/deny-knock handler — which runs on a *different* socket
-// than the one that knocked — can actually find the pending entry.
 const pendingKnocks = new Map<string, { userId: string | null; userName: string; roomId: string }>()
 
 export function registerSocketHandlers(io: Server) {
@@ -148,10 +138,6 @@ export function registerSocketHandlers(io: Server) {
       log.info(`[ROOM] User admitted — user = ${admittedName} | email = ${admittedEmail} | role = ${role} | room = ${roomId}`)
     }
 
-    // Legge il token di sessione dal cookie httpOnly presente nell'header
-    // Cookie della richiesta HTTP di handshake (mai da handshake.auth o dal
-    // payload dell'evento: il cookie httpOnly non è leggibile né forgiabile
-    // da JS lato client, a differenza di un valore passato a mano).
     const cookieHeader = socket.handshake.headers.cookie
     let handshakeToken: string | undefined
     if (cookieHeader) {
@@ -233,9 +219,6 @@ export function registerSocketHandlers(io: Server) {
         return
       }
 
-      // Existing room: owner is always admitted directly.
-      // Other members (editor/viewer) must still pass the password if the room is locked.
-      // Unknown visitors must knock (or pass password if locked).
       const roomRow = dbGetRoom(roomId)
 
       if (currentUserId) {
@@ -352,9 +335,7 @@ export function registerSocketHandlers(io: Server) {
         log.warn(`[ROOM] code-change su file non appartenente alla room — file = ${fileId} | user = ${currentUser} | room = ${currentRoom}`)
         return
       }
-      // Broadcast to ALL clients including sender so every client's
-      // lastSyncedContent converges to the authoritative server state,
-      // preventing divergence when concurrent full-content writes race.
+
       io.to(currentRoom).emit('code-update', { fileId, content, fromSocketId: socket.id })
     })
 
@@ -366,12 +347,7 @@ export function registerSocketHandlers(io: Server) {
       if (!isBoundedString(insert, LIMITS.PATCH_INSERT)) return
       if (!currentRoom) return
       if (getRole(socket) === 'viewer') return
-      // Apply the patch on the server's authoritative state and broadcast the
-      // resulting full content (not the raw patch). This prevents divergence
-      // when two clients send concurrent patches computed on the same base: each
-      // patch is applied sequentially on the server's up-to-date content, and
-      // all other clients replace their local copy with the authoritative result
-      // instead of trying to re-apply a stale delta.
+
       const updated = applyFilePatch(currentRoom, fileId, start, deleteCount, insert)
       if (updated === null) {
         log.warn(`[ROOM] code-patch su file non appartenente alla room — file = ${fileId} | user = ${currentUser} | room = ${currentRoom}`)
@@ -413,8 +389,7 @@ export function registerSocketHandlers(io: Server) {
       { entries }: { entries: { tempId: string; parentTempId: string | null; name: string; type: 'file' | 'folder'; content?: string }[] },
       callback?: (idMap: Record<string, string>) => void,
     ) => {
-      // '__rejected' sentinel lets the client distinguish a server-side
-      // rejection from a legitimate empty import result.
+
       const reject = () => { if (typeof callback === 'function') callback({ __rejected: '1' }) }
       if (!checkRateLimit(socket, 'import-zip')) { reject(); return }
       if (!Array.isArray(entries) || entries.length === 0 || entries.length > LIMITS.IMPORT_ENTRIES) { reject(); return }
@@ -436,7 +411,6 @@ export function registerSocketHandlers(io: Server) {
 
         if (isString(content)) {
           totalContentSize += content.length
-          // Budget esaurito: interrompiamo l'import qui, le entry già create restano valide
           if (totalContentSize > LIMITS.IMPORT_TOTAL_CONTENT) break
         }
 
@@ -480,9 +454,7 @@ export function registerSocketHandlers(io: Server) {
       if (!isBoundedString(code, LIMITS.RUN_CODE)) return
       if (!currentRoom) return
       if (getRole(socket) === 'viewer') return
-      // run-started/run-result drive only the local "Running…" spinner and
-      // output console for whoever clicked Run — they're not collaborative
-      // state, so they go to the requesting socket only, not the whole room.
+
       socket.emit('run-started', { language })
       const result = await executeCode(language, code)
       socket.emit('run-result', {
@@ -601,9 +573,7 @@ export function registerSocketHandlers(io: Server) {
       if (currentUserId) untrackUserSocket(currentRoom, currentUserId, socket)
       const wasOwner = getRole(socket) === 'owner'
       removeParticipant(currentRoom, socket.id)
-      // If the leaving user was an owner and no other owner is still online,
-      // deny all pending knocks for this room — without an owner to respond
-      // the knockers would be stuck on the "pending" screen indefinitely.
+
       if (wasOwner && !hasOnlineOwner(currentRoom)) {
         for (const [knockId, knock] of pendingKnocks.entries()) {
           if (knock.roomId === currentRoom) {

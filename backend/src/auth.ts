@@ -52,8 +52,7 @@ function generateSessionToken(): string {
 function sessionCookieOptions(maxAgeSeconds: number) {
   return {
     httpOnly: true,
-    // In sviluppo il frontend gira su http://localhost, quindi niente
-    // Secure (i browser scartano i cookie Secure su origin non https).
+
     secure: process.env.NODE_ENV === 'production',
     sameSite: 'lax' as const,
     path: '/',
