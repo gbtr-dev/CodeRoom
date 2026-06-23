@@ -276,3 +276,9 @@ export function removeRoom(roomId: string) {
   flushRoomContent(roomId)
   rooms.delete(roomId)
 }
+
+export function hasOnlineOwner(roomId: string): boolean {
+  const room = rooms.get(roomId)
+  if (!room) return false
+  return Array.from(room.participants.values()).some(p => p.role === 'owner')
+}

@@ -357,7 +357,13 @@ export async function registerAuthRoutes(app: FastifyInstance) {
     protectedRoutes.put('/auth/me/avatar', async (req, reply) => {
       const { avatar } = req.body as { avatar?: string }
       if (!avatar || typeof avatar !== 'string') return reply.status(400).send({ error: 'avatar is required' })
-      if (!avatar.startsWith('data:image/')) return reply.status(400).send({ error: 'Invalid image format' })
+      // Whitelist raster-only MIME types. data:image/svg+xml is excluded because
+      // SVGs can contain <script> tags that execute in some browser contexts.
+      const ALLOWED_AVATAR_MIME = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
+      const mimeMatch = avatar.match(/^data:([^;,]+)/)
+      if (!mimeMatch || !ALLOWED_AVATAR_MIME.includes(mimeMatch[1])) {
+        return reply.status(400).send({ error: 'Invalid image format. Allowed: JPEG, PNG, GIF, WebP' })
+      }
       // Base64 payload only (strip the data URL prefix for size check)
       const base64 = avatar.split(',')[1] ?? ''
       const bytes = Math.ceil(base64.length * 0.75)

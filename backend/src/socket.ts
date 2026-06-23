@@ -10,6 +10,7 @@ import {
   deleteFile,
   getRoomFiles,
   removeRoom,
+  hasOnlineOwner,
 } from './rooms'
 import { executeCode } from './executor'
 import { dbRoomExists, dbAddRoomMember, dbCreateRoom, dbGetUserById, dbSetRoomName, dbGetRoom, dbGetMemberRole, dbSetMemberRole, dbGetRoomMembers, dbRemoveMember, dbRenameFile, dbMoveFile, dbSaveChatMessage, dbGetChatMessages, type RoomRole } from './db'
@@ -91,7 +92,7 @@ export function disconnectAllUserSockets(userId: string) {
 // Shared across ALL connections (module scope) so that the owner's
 // approve-knock/deny-knock handler — which runs on a *different* socket
 // than the one that knocked — can actually find the pending entry.
-const pendingKnocks = new Map<string, { userId: string | null; userName: string }>()
+const pendingKnocks = new Map<string, { userId: string | null; userName: string; roomId: string }>()
 
 export function registerSocketHandlers(io: Server) {
   ioInstance = io
@@ -280,7 +281,7 @@ export function registerSocketHandlers(io: Server) {
       }
 
       // No password — send knock to all owners currently in the room
-      pendingKnocks.set(socket.id, { userId: currentUserId, userName: currentUser })
+      pendingKnocks.set(socket.id, { userId: currentUserId, userName: currentUser, roomId })
       log.info(`[ROOM] Knock received — user = ${currentUser} | email = ${currentUserEmail} | room = ${roomId}`)
 
       const room = getOrCreateRoom(roomId)
@@ -596,7 +597,19 @@ export function registerSocketHandlers(io: Server) {
       pendingKnocks.delete(socket.id)
       if (!currentRoom) return
       if (currentUserId) untrackUserSocket(currentRoom, currentUserId, socket)
+      const wasOwner = getRole(socket) === 'owner'
       removeParticipant(currentRoom, socket.id)
+      // If the leaving user was an owner and no other owner is still online,
+      // deny all pending knocks for this room — without an owner to respond
+      // the knockers would be stuck on the "pending" screen indefinitely.
+      if (wasOwner && !hasOnlineOwner(currentRoom)) {
+        for (const [knockId, knock] of pendingKnocks.entries()) {
+          if (knock.roomId === currentRoom) {
+            io.sockets.sockets.get(knockId)?.emit('knock-denied')
+            pendingKnocks.delete(knockId)
+          }
+        }
+      }
       socket.to(currentRoom).emit('participant-left', { id: socket.id })
       log.info(`[ROOM] User left — user = ${currentUser} |  email = ${currentUserEmail} | room = ${currentRoom}`)
     })
