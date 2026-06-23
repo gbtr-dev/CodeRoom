@@ -126,6 +126,10 @@ export function useFileTree({
     return set
   }
 
+  // Optimistic client-side guard for drag-drop UX. The server always
+  // re-validates the move in dbMoveFile, so a stale local tree can't
+  // cause actual data corruption — only a spurious optimistic update
+  // that gets corrected on the next server broadcast.
   function canMove(id: string, targetParentId: string) {
     const node = nodes.find((n) => n.id === id)
     if (!node) return false

@@ -231,6 +231,10 @@ export function useImportExport({
         const timer = setTimeout(() => reject(new Error("ZIP import timed out")), 30_000)
         socketRef.current?.emit("import-zip", { entries }, (idMap: Record<string, string>) => {
           clearTimeout(timer)
+          if (idMap["__rejected"]) {
+            reject(new Error("Import rejected: too many entries or total size exceeded"))
+            return
+          }
           // files-imported event already updated nodes for all clients;
           // just open the first file for the importer
           if (firstFileTempId) {

@@ -116,9 +116,10 @@ app.listen({ port: 3001, host: '127.0.0.1' }, (err) => {
     cors: {
       origin: CORS_ORIGIN,
       methods: ['GET', 'POST'],
-
       credentials: true,
     },
+    // Compress WebSocket frames larger than 1 KB (code-update, room-state, etc.)
+    perMessageDeflate: { threshold: 1024 },
   })
 
   registerSocketHandlers(io)

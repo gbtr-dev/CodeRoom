@@ -413,7 +413,9 @@ export function registerSocketHandlers(io: Server) {
       { entries }: { entries: { tempId: string; parentTempId: string | null; name: string; type: 'file' | 'folder'; content?: string }[] },
       callback?: (idMap: Record<string, string>) => void,
     ) => {
-      const reject = () => { if (typeof callback === 'function') callback({}) }
+      // '__rejected' sentinel lets the client distinguish a server-side
+      // rejection from a legitimate empty import result.
+      const reject = () => { if (typeof callback === 'function') callback({ __rejected: '1' }) }
       if (!checkRateLimit(socket, 'import-zip')) { reject(); return }
       if (!Array.isArray(entries) || entries.length === 0 || entries.length > LIMITS.IMPORT_ENTRIES) { reject(); return }
       if (!currentRoom) return
