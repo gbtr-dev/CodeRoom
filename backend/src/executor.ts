@@ -104,9 +104,46 @@ function runProcess(
 }
 
 async function runNode(code: string, start: number): Promise<ExecResult> {
-  // Wrap in an async IIFE so top-level await works
-  const wrapped = `(async () => { ${code} })()`
-  return runProcess('node', ['--eval', wrapped], start, 'js')
+  // Run user code inside vm.runInNewContext so that require, process, and all
+  // Node.js built-in modules are NOT available — only the safe subset of globals
+  // we explicitly allow. JSON.stringify embeds the code safely without shell escaping.
+  const dir = join(tmpdir(), `coderoom-js-${randomBytes(6).toString('hex')}`)
+  const file = join(dir, 'sandbox.js')
+  const script = `
+'use strict';
+const vm = require('vm');
+const ctx = vm.createContext({
+  console: {
+    log:   (...a) => process.stdout.write(a.map(String).join(' ') + '\\n'),
+    error: (...a) => process.stderr.write(a.map(String).join(' ') + '\\n'),
+    warn:  (...a) => process.stderr.write(a.map(String).join(' ') + '\\n'),
+    info:  (...a) => process.stdout.write(a.map(String).join(' ') + '\\n'),
+  },
+  Math, JSON, Date, Error, RegExp,
+  Array, Object, String, Number, Boolean, Symbol, BigInt,
+  Map, Set, WeakMap, WeakSet, Promise,
+  setTimeout, setInterval, clearTimeout, clearInterval,
+  parseInt, parseFloat, isNaN, isFinite,
+  encodeURIComponent, decodeURIComponent,
+  Buffer, Uint8Array, Int8Array, Float64Array, ArrayBuffer,
+});
+const code = ${JSON.stringify(code)};
+(async () => {
+  try {
+    await vm.runInNewContext('(async () => {\\n' + code + '\\n})()', ctx, { timeout: 9500, breakOnSigint: true });
+  } catch (e) {
+    process.stderr.write((e && e.message ? e.message : String(e)) + '\\n');
+    process.exitCode = 1;
+  }
+})();
+`
+  try {
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(file, script, 'utf8')
+    return await runProcess('node', [file], start, 'js')
+  } finally {
+    try { rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
 }
 
 async function runPython(code: string, start: number): Promise<ExecResult> {

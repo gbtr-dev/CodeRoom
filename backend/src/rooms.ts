@@ -5,6 +5,7 @@ import {
   dbCreateFile,
   dbUpdateFileContent,
   dbDeleteFile,
+  dbDeleteFileTreeTx,
   type RoomRole,
 } from './db'
 
@@ -242,33 +243,12 @@ function removeFileFromCache(fileId: string, room?: Room) {
 export function deleteFile(roomId: string, fileId: string): boolean {
   const room = getOrCreateRoom(roomId)
   ensureCacheLoaded(room)
-  const rows = dbGetFiles(roomId)
-
-  // fileId deve essere effettivamente uno dei file/cartelle di QUESTA room.
-  // Senza questo controllo, un fileId di un'altra room non avrebbe
-  // discendenti da trovare qui (i `rows` sono già scoped a roomId), ma
-  // verrebbe comunque passato a dbDeleteFile come unico elemento — il che
-  // un tempo cancellava il file altrui, perché dbDeleteFile non
-  // verificava room_id.
-  if (!rows.some((row) => row.id === fileId)) return false
-
-  const toRemove = new Set<string>([fileId])
-  let changed = true
-  while (changed) {
-    changed = false
-    for (const row of rows) {
-      if (toRemove.has(row.parent_id) && !toRemove.has(row.id)) {
-        toRemove.add(row.id)
-        changed = true
-      }
-    }
-  }
-  for (const id of toRemove) removeFileFromCache(id, room)
-
-  // Pass all IDs: the DB CTE would handle it alone, but using the
-  // already-collected set avoids a second recursive scan in SQLite.
-  // dbDeleteFile is still scoped to room_id as defense-in-depth.
-  dbDeleteFile([...toRemove], roomId)
+  // dbDeleteFileTreeTx reads the descendant IDs and deletes the whole subtree
+  // in a single SQLite transaction, removing the TOCTOU gap between the
+  // "collect descendants" read and the actual DELETE.
+  const deletedIds = dbDeleteFileTreeTx(fileId, roomId)
+  if (deletedIds.length === 0) return false
+  for (const id of deletedIds) removeFileFromCache(id, room)
   return true
 }
 
