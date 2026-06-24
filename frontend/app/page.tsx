@@ -662,7 +662,7 @@ export default function LandingPage() {
 
         <div className="flex items-center gap-2.5">
           <a
-            href="https://github.com/gbtr-dev"
+            href="https://github.com/gbtr-dev/coderoom"
             target="_blank" rel="noopener noreferrer"
             className="flex items-center gap-[7px] rounded-lg border border-white/[0.07] bg-white/[0.03] px-3 py-1.5 text-[13px] text-[#777] no-underline transition-all duration-150 hover:border-white/[0.14] hover:text-[#ccc] hover:scale-[1.03] hover:-translate-y-px active:scale-[0.97]"
           >
