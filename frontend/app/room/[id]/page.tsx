@@ -108,6 +108,9 @@ export default function CoderoomPage() {
   const [running, setRunning] = useState(false)
   const [progress, setProgress] = useState(false)
   const [outputExpanded, setOutputExpanded] = useState(false)
+  const [stdinModal, setStdinModal] = useState(false)
+  const [stdinValue, setStdinValue] = useState("")
+  const [stdinFields, setStdinFields] = useState<string[]>([])
 
   const [activeLine, setActiveLine] = useState(1)
   const [activeCol, setActiveCol] = useState(0)
@@ -828,10 +831,30 @@ export default function CoderoomPage() {
       setOutput([{ t: "▲ File is empty. Write some code first.", kind: "muted" }])
       return
     }
+    const prompts = extractInputPrompts(activeContent, lang)
+    setStdinFields(prompts.map(() => ""))
+    setStdinValue("")
+    setStdinModal(true)
+  }
+
+  function extractInputPrompts(code: string, language: string): string[] {
+    const prompts: string[] = []
+    if (language === 'py') {
+      for (const m of code.matchAll(/input\s*\(\s*["']([^"']*)["']\s*\)/g)) prompts.push(m[1])
+    } else if (['js', 'jsx', 'ts', 'tsx'].includes(language)) {
+      for (const m of code.matchAll(/(?:question|prompt)\s*\(\s*["'`]([^"'`]*)["'`]/g)) prompts.push(m[1])
+    } else if (language === 'java') {
+      for (const m of code.matchAll(/System\.out\.print(?:ln)?\s*\(\s*["']([^"']*)["']\s*\)/g)) prompts.push(m[1])
+    }
+    return prompts
+  }
+
+  function submitRun(stdin: string) {
+    setStdinModal(false)
     setRunning(true)
     setProgress(true)
     setOutput([{ t: `$ ${RUN_CMD[lang]}`, kind: "info" }, { t: "Running…", kind: "muted" }])
-    socketRef.current?.emit("run-code", { language: lang, code: activeContent })
+    socketRef.current?.emit("run-code", { language: lang, code: activeContent, stdin: stdin || undefined })
     setTimeout(() => setProgress(false), 1000)
   }
 
@@ -1317,6 +1340,58 @@ export default function CoderoomPage() {
           />
         </div>
       </div>
+
+      {/* stdin modal */}
+      {stdinModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setStdinModal(false)}>
+          <div className="w-[460px] rounded-lg border border-[#1e1e1e] bg-[#0e0e0e] p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <p className="mb-1 font-sans text-[13px] font-semibold text-neutral-200">Input del programma</p>
+            {stdinFields.length > 0 ? (
+              <>
+                <p className="mb-3 font-sans text-[11px] text-neutral-600">Inserisci i valori richiesti dal programma.</p>
+                <div className="flex flex-col gap-2">
+                  {stdinFields.map((val, i) => {
+                    const prompts = extractInputPrompts(activeContent, lang)
+                    return (
+                      <div key={i} className="flex items-center gap-2">
+                        <label className="w-40 shrink-0 truncate font-mono text-[11px] text-neutral-500">{prompts[i] || `Input ${i + 1}`}</label>
+                        <input
+                          autoFocus={i === 0}
+                          value={val}
+                          onChange={(e) => setStdinFields(prev => prev.map((v, j) => j === i ? e.target.value : v))}
+                          onKeyDown={(e) => { if (e.key === "Enter") submitRun(stdinFields.join("\n")) }}
+                          className="flex-1 rounded border border-[#1e1e1e] bg-[#080808] px-3 py-1.5 font-mono text-[12px] text-neutral-200 outline-none focus:border-[#2e2e2e]"
+                        />
+                      </div>
+                    )
+                  })}
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="mb-3 font-sans text-[11px] text-neutral-600">Un valore per riga, nell&apos;ordine in cui il programma li chiede. Lascia vuoto se non serve input.</p>
+                <textarea
+                  autoFocus
+                  value={stdinValue}
+                  onChange={(e) => setStdinValue(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submitRun(stdinValue) }}
+                  placeholder={"Mario\n25"}
+                  className="h-28 w-full resize-none rounded border border-[#1e1e1e] bg-[#080808] px-3 py-2 font-mono text-[12px] text-neutral-200 placeholder-neutral-700 outline-none focus:border-[#2e2e2e]"
+                />
+              </>
+            )}
+            <div className="mt-3 flex justify-end gap-2">
+              <button onClick={() => setStdinModal(false)} className="rounded px-3 py-1.5 font-sans text-[12px] text-neutral-500 hover:text-neutral-300">Cancel</button>
+              <button
+                onClick={() => submitRun(stdinFields.length > 0 ? stdinFields.join("\n") : stdinValue)}
+                className="rounded bg-[#22c55e]/10 px-3 py-1.5 font-sans text-[12px] text-[#22c55e] hover:bg-[#22c55e]/20"
+              >
+                Run ↵
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* context menu */}
       <FileTreeContextMenu

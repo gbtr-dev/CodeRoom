@@ -1,12 +1,12 @@
 "use client"
 
 import type React from "react"
-import { Fragment } from "react"
+import { Fragment, useState, useRef, useEffect } from "react"
 import type { FileNode, Lang } from "@/lib/highlight"
 import { getLang, LANG_META } from "@/lib/highlight"
 import {
   ChevronIcon, FolderIcon, FilePlusIcon, FolderPlusIcon,
-  RenameIcon, TrashIcon, DownloadIcon, UploadIcon,
+  RenameIcon, TrashIcon, DownloadIcon, UploadIcon, SearchIcon,
 } from "@/components/room/Icons"
 import { MenuItem, InlineEntry } from "@/components/room/FileTreeHelpers"
 
@@ -99,6 +99,47 @@ export function FileTree({
   handleImportZipChange: (e: React.ChangeEvent<HTMLInputElement>) => void
   exportProject: () => void
 }) {
+  const [searching, setSearching] = useState(false)
+  const [query, setQuery] = useState("")
+  const searchInputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (searching) searchInputRef.current?.focus()
+    else setQuery("")
+  }, [searching])
+
+  type SearchMatch = { node: FileNode; line: number; text: string }
+
+  function getMatches(): SearchMatch[] {
+    if (!query.trim()) return []
+    const q = query.toLowerCase()
+    const results: SearchMatch[] = []
+    for (const node of nodes) {
+      if (node.kind !== "file" || !node.content) continue
+      const lines = node.content.split("\n")
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].toLowerCase().includes(q)) {
+          results.push({ node, line: i + 1, text: lines[i] })
+          if (results.length >= 100) return results
+        }
+      }
+    }
+    return results
+  }
+
+  function highlight(text: string): React.ReactNode {
+    const q = query.toLowerCase()
+    const idx = text.toLowerCase().indexOf(q)
+    if (idx === -1) return <span>{text}</span>
+    return (
+      <>
+        {text.slice(0, idx)}
+        <mark className="bg-[#22c55e]/25 text-[#22c55e] rounded-[2px]">{text.slice(idx, idx + q.length)}</mark>
+        {text.slice(idx + q.length)}
+      </>
+    )
+  }
+
   function renderTree(parentId: string, depth: number): React.ReactNode {
     const children = sortNodes(nodes.filter((n) => n.parentId === parentId))
     const pad = depth * 12
@@ -184,13 +225,33 @@ export function FileTree({
     )
   }
 
+  const matches = getMatches()
+
   return (
     <>
       {/* Explorer header */}
       <div className="flex h-9 shrink-0 items-center justify-between px-3 border-b border-[#ffffff06]">
-        <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-neutral-700">Explorer</span>
-        <div className="relative">
-          {canEdit && (
+        {searching ? (
+          <input
+            ref={searchInputRef}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Escape") setSearching(false) }}
+            placeholder="Search in files…"
+            className="flex-1 bg-transparent font-sans text-[12px] text-neutral-300 placeholder-neutral-700 outline-none"
+          />
+        ) : (
+          <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-neutral-700">Explorer</span>
+        )}
+        <div className="relative flex items-center gap-1">
+          <button
+            onMouseDown={(e) => { e.stopPropagation(); setSearching((v) => !v); setPlusMenu(false) }}
+            className={`flex h-5 w-5 items-center justify-center rounded transition-colors hover:bg-[#1c1c1c] ${searching ? "text-[#22c55e]" : "text-neutral-600 hover:text-neutral-300"}`}
+            aria-label="Search in files"
+          >
+            <SearchIcon className="h-3.5 w-3.5" />
+          </button>
+          {!searching && canEdit && (
             <button
               onMouseDown={(e) => { e.stopPropagation(); setPlusMenu((v) => !v); setMenu(null) }}
               className="flex h-5 w-5 items-center justify-center rounded text-neutral-600 transition-colors hover:bg-[#1c1c1c] hover:text-neutral-300"
@@ -215,21 +276,49 @@ export function FileTree({
         </div>
       </div>
 
-      <div
-        className="min-h-0 flex-1 overflow-auto py-1.5 scrollbar-none px-1.5"
-        onDragOver={(e) => { if (dragId && canMove(dragId, "root")) { e.preventDefault(); e.dataTransfer.dropEffect = "move"; setDropTarget("root") } }}
-        onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropTarget((t) => (t === "root" ? null : t)) }}
-        onDrop={(e) => { e.preventDefault(); if (dragId) moveNode(dragId, "root") }}
-      >
-        <button
-          onClick={() => setRootOpen((v) => !v)}
-          className={`flex w-full items-center gap-1.5 rounded-md px-2 py-[5px] text-left text-[11px] font-semibold uppercase tracking-wider text-neutral-600 transition-colors hover:bg-[#ffffff06] hover:text-neutral-400 ${dropTarget === "root" ? "bg-[#22c55e]/10" : ""}`}
+      {searching ? (
+        <div className="min-h-0 flex-1 overflow-auto py-1 px-1.5 cr-scroll">
+          {query.trim() === "" ? (
+            <p className="px-2 py-3 font-sans text-[11px] text-neutral-700">Type to search across all files.</p>
+          ) : matches.length === 0 ? (
+            <p className="px-2 py-3 font-sans text-[11px] text-neutral-700">No results for &quot;{query}&quot;.</p>
+          ) : (
+            <>
+              <p className="px-2 py-1 font-sans text-[10px] text-neutral-700">{matches.length}{matches.length === 100 ? "+" : ""} result{matches.length !== 1 ? "s" : ""}</p>
+              {matches.map((m, i) => (
+                <button
+                  key={i}
+                  onClick={() => { openFile(m.node.id); setSearching(false) }}
+                  className="flex w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left hover:bg-[#ffffff06]"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span className="h-[6px] w-[6px] shrink-0 rounded-full" style={{ backgroundColor: LANG_META[getLang(m.node.name)].dot }} />
+                    <span className="truncate font-sans text-[11px] font-medium text-neutral-400">{m.node.name}</span>
+                    <span className="ml-auto shrink-0 font-mono text-[10px] text-neutral-700">:{m.line}</span>
+                  </span>
+                  <span className="truncate pl-3.5 font-mono text-[11px] text-neutral-600">{highlight(m.text.trim())}</span>
+                </button>
+              ))}
+            </>
+          )}
+        </div>
+      ) : (
+        <div
+          className="min-h-0 flex-1 overflow-auto py-1.5 scrollbar-none px-1.5"
+          onDragOver={(e) => { if (dragId && canMove(dragId, "root")) { e.preventDefault(); e.dataTransfer.dropEffect = "move"; setDropTarget("root") } }}
+          onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropTarget((t) => (t === "root" ? null : t)) }}
+          onDrop={(e) => { e.preventDefault(); if (dragId) moveNode(dragId, "root") }}
         >
-          <ChevronIcon className={`h-2.5 w-2.5 shrink-0 text-neutral-700 transition-transform duration-150 ${rootOpen ? "rotate-90" : ""}`} />
-          <span className="truncate">{rootName}</span>
-        </button>
-        {rootOpen && renderTree("root", 0)}
-      </div>
+          <button
+            onClick={() => setRootOpen((v) => !v)}
+            className={`flex w-full items-center gap-1.5 rounded-md px-2 py-[5px] text-left text-[11px] font-semibold uppercase tracking-wider text-neutral-600 transition-colors hover:bg-[#ffffff06] hover:text-neutral-400 ${dropTarget === "root" ? "bg-[#22c55e]/10" : ""}`}
+          >
+            <ChevronIcon className={`h-2.5 w-2.5 shrink-0 text-neutral-700 transition-transform duration-150 ${rootOpen ? "rotate-90" : ""}`} />
+            <span className="truncate">{rootName}</span>
+          </button>
+          {rootOpen && renderTree("root", 0)}
+        </div>
+      )}
     </>
   )
 }

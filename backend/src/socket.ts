@@ -448,15 +448,16 @@ export function registerSocketHandlers(io: Server) {
       log.info(`[ROOM] File deleted — file = ${fileId} | user = ${currentUser} |  email = ${currentUserEmail} | room = ${currentRoom}`)
     })
 
-    safeOn(socket, 'run-code', async ({ language, code }: { language: string; code: string }) => {
+    safeOn(socket, 'run-code', async ({ language, code, stdin }: { language: string; code: string; stdin?: string }) => {
       if (!checkRateLimit(socket, 'run-code')) return
       if (!isString(language)) return
       if (!isBoundedString(code, LIMITS.RUN_CODE)) return
+      if (stdin !== undefined && !isBoundedString(stdin, 10_000)) return
       if (!currentRoom) return
       if (getRole(socket) === 'viewer') return
 
       socket.emit('run-started', { language })
-      const result = await executeCode(language, code)
+      const result = await executeCode(language, code, stdin)
       socket.emit('run-result', {
         output: result.output,
         error: result.error,

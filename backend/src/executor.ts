@@ -35,29 +35,32 @@ const LANG_CONFIGS: Record<string, LangConfig> = {
   shell:  { image: 'alpine:3.20',          filename: 'script.sh'  },
 }
 
-function buildShCmd(filename: string): string {
+// Code is embedded as base64 in the shell command so stdin remains free
+// for user input. `printf %s` avoids the trailing newline that `echo` adds,
+// which matters for binary-safe decoding.
+function buildShCmd(filename: string, codeBase64: string): string {
   const f = `/tmp/${filename}`
-  const base = `cat > ${f}`
-  if (filename === 'index.js')   return `${base} && node ${f}`
-  if (filename === 'index.jsx')  return `${base} && node ${f}`
-  if (filename === 'index.ts')   return `${base} && node --experimental-strip-types ${f}`
-  if (filename === 'index.tsx')  return `${base} && node --experimental-strip-types ${f}`
-  if (filename === 'main.py')    return `${base} && python ${f}`
-  if (filename === 'main.go')    return `${base} && cd /tmp && go run main.go`
-  if (filename === 'Main.java')  return `${base} && java ${f}`
-  if (filename === 'Main.kt')    return `${base} && kotlinc ${f} -include-runtime -d /tmp/main.jar 2>/dev/null && java -jar /tmp/main.jar`
-  if (filename === 'main.c')     return `${base} && gcc -o /tmp/out ${f} && /tmp/out`
-  if (filename === 'main.cpp')   return `${base} && g++ -o /tmp/out ${f} && /tmp/out`
-  if (filename === 'main.rs')    return `${base} && rustc -o /tmp/out ${f} && /tmp/out`
-  if (filename === 'Program.cs') return `${base} && mcs -out:/tmp/prog.exe ${f} && mono /tmp/prog.exe`
-  if (filename === 'main.swift') return `${base} && swift ${f}`
-  if (filename === 'main.rb')    return `${base} && ruby ${f}`
-  if (filename === 'main.php')   return `${base} && php ${f}`
-  if (filename === 'main.pl')    return `${base} && perl ${f}`
-  if (filename === 'main.lua')   return `${base} && lua ${f}`
-  if (filename === 'main.R')     return `${base} && Rscript ${f}`
-  if (filename === 'script.sh')  return `${base} && sh ${f}`
-  return `${base} && ${f}`
+  const decode = `printf '%s' '${codeBase64}' | base64 -d > ${f}`
+  if (filename === 'index.js')   return `${decode} && node ${f}`
+  if (filename === 'index.jsx')  return `${decode} && node ${f}`
+  if (filename === 'index.ts')   return `${decode} && node --experimental-strip-types ${f}`
+  if (filename === 'index.tsx')  return `${decode} && node --experimental-strip-types ${f}`
+  if (filename === 'main.py')    return `${decode} && python ${f}`
+  if (filename === 'main.go')    return `${decode} && cd /tmp && go run main.go`
+  if (filename === 'Main.java')  return `${decode} && java ${f}`
+  if (filename === 'Main.kt')    return `${decode} && kotlinc ${f} -include-runtime -d /tmp/main.jar 2>/dev/null && java -jar /tmp/main.jar`
+  if (filename === 'main.c')     return `${decode} && gcc -o /tmp/out ${f} && /tmp/out`
+  if (filename === 'main.cpp')   return `${decode} && g++ -o /tmp/out ${f} && /tmp/out`
+  if (filename === 'main.rs')    return `${decode} && rustc -o /tmp/out ${f} && /tmp/out`
+  if (filename === 'Program.cs') return `${decode} && mcs -out:/tmp/prog.exe ${f} && mono /tmp/prog.exe`
+  if (filename === 'main.swift') return `${decode} && swift ${f}`
+  if (filename === 'main.rb')    return `${decode} && ruby ${f}`
+  if (filename === 'main.php')   return `${decode} && php ${f}`
+  if (filename === 'main.pl')    return `${decode} && perl ${f}`
+  if (filename === 'main.lua')   return `${decode} && lua ${f}`
+  if (filename === 'main.R')     return `${decode} && Rscript ${f}`
+  if (filename === 'script.sh')  return `${decode} && sh ${f}`
+  return `${decode} && ${f}`
 }
 
 // ── Warm container pool ───────────────────────────────────────────────────────
@@ -133,7 +136,7 @@ export async function initContainerPool() {
 
 // ── Execution ─────────────────────────────────────────────────────────────────
 
-export async function executeCode(language: string, code: string): Promise<ExecResult> {
+export async function executeCode(language: string, code: string, stdin?: string): Promise<ExecResult> {
   const start = Date.now()
   const config = LANG_CONFIGS[language]
 
@@ -141,15 +144,17 @@ export async function executeCode(language: string, code: string): Promise<ExecR
     return { output: '', error: `Language "${language}" is not supported for execution.`, exitCode: 1, duration: 0 }
   }
 
-  const shCmd = buildShCmd(config.filename)
+  const codeBase64 = Buffer.from(code).toString('base64')
+  const shCmd = buildShCmd(config.filename, codeBase64)
   const timeoutMs = config.timeoutMs ?? INTERP_TIMEOUT
+  const stdinPayload = stdin ?? ''
 
   if (WARM_LANGUAGES.includes(language)) {
     const containerId = await acquireContainer(language)
     if (containerId) {
       const result = await runProcess(
         'docker', ['exec', '-i', containerId, 'sh', '-c', shCmd],
-        code, start, timeoutMs
+        stdinPayload, start, timeoutMs
       )
       killContainer(containerId)
       return result
@@ -175,7 +180,7 @@ export async function executeCode(language: string, code: string): Promise<ExecR
       config.image,
       'sh', '-c', shCmd,
     ],
-    code, start, timeoutMs
+    stdinPayload, start, timeoutMs
   )
 }
 
