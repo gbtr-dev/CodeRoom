@@ -93,7 +93,7 @@ process.on('SIGINT', () => shutdown('SIGINT'))
 process.on('SIGTERM', () => shutdown('SIGTERM'))
 
 
-app.listen({ port: 3001, host: '127.0.0.1' }, (err) => {
+app.listen({ port: 45032, host: '0.0.0.0' }, (err) => {
   if (err) { log.error('Errore avvio server', { error: String(err) }); process.exit(1) }
 
   const io = new Server(app.server, {

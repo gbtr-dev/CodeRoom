@@ -1,107 +1,69 @@
 import { spawn } from 'child_process'
-import { writeFileSync, mkdirSync, rmSync } from 'fs'
-import { join } from 'path'
-import { tmpdir } from 'os'
-import { randomBytes } from 'crypto'
 
 type ExecResult = { output: string; error: string; exitCode: number; duration: number }
 
 type LangConfig = {
   image: string
   filename: string
-  cmd: string[]
   extraEnv?: string[]
   timeoutMs?: number
 }
 
-const INTERP_TIMEOUT  = 15_000   // interpreted: 15 s
-const COMPILE_TIMEOUT = 60_000   // compiled: 60 s (includes compilation)
-const MAX_OUTPUT      = 100_000  // 100 KB stdout + stderr cap
+const INTERP_TIMEOUT  = 15_000
+const COMPILE_TIMEOUT = 60_000
+const MAX_OUTPUT      = 100_000
 
-// One entry per executable language. Languages without a command (SQL, HTML,
-// CSS, JSON, MD, …) are simply absent — the handler returns a clear message.
+// Each entry defines the image and filename; the docker command is always
+// `sh -c "cat > /tmp/<filename> && <run command>"` so code arrives via stdin
+// and no host volume mount is needed (works with remote Docker daemons too).
 const LANG_CONFIGS: Record<string, LangConfig> = {
-  // ── JavaScript / TypeScript ───────────────────────────────────────────────
-  js:  { image: 'node:22-alpine', filename: 'index.js',  cmd: ['node', 'index.js'] },
-  jsx: { image: 'node:22-alpine', filename: 'index.jsx', cmd: ['node', 'index.jsx'] },
-  ts:  { image: 'node:22-alpine', filename: 'index.ts',  cmd: ['node', '--experimental-strip-types', 'index.ts'] },
-  tsx: { image: 'node:22-alpine', filename: 'index.tsx', cmd: ['node', '--experimental-strip-types', 'index.tsx'] },
+  js:     { image: 'node:22-alpine',       filename: 'index.js'   },
+  jsx:    { image: 'node:22-alpine',       filename: 'index.jsx'  },
+  ts:     { image: 'node:22-alpine',       filename: 'index.ts'   },
+  tsx:    { image: 'node:22-alpine',       filename: 'index.tsx'  },
+  py:     { image: 'python:3.12-alpine',   filename: 'main.py'    },
+  go:     { image: 'golang:1.23-alpine',   filename: 'main.go',   extraEnv: ['GOPATH=/tmp/go', 'GOCACHE=/tmp/cache', 'HOME=/tmp'], timeoutMs: COMPILE_TIMEOUT },
+  java:   { image: 'openjdk:21-slim',      filename: 'Main.java', timeoutMs: COMPILE_TIMEOUT },
+  kotlin: { image: 'zenika/kotlin:latest', filename: 'Main.kt',   timeoutMs: COMPILE_TIMEOUT },
+  c:      { image: 'gcc:latest',           filename: 'main.c',    timeoutMs: COMPILE_TIMEOUT },
+  cpp:    { image: 'gcc:latest',           filename: 'main.cpp',  timeoutMs: COMPILE_TIMEOUT },
+  rust:   { image: 'rust:alpine',          filename: 'main.rs',   extraEnv: ['CARGO_HOME=/tmp/cargo'], timeoutMs: COMPILE_TIMEOUT },
+  csharp: { image: 'mono:latest',          filename: 'Program.cs',timeoutMs: COMPILE_TIMEOUT },
+  swift:  { image: 'swift:slim',           filename: 'main.swift',extraEnv: ['HOME=/tmp'], timeoutMs: COMPILE_TIMEOUT },
+  ruby:   { image: 'ruby:3.3-alpine',      filename: 'main.rb'    },
+  php:    { image: 'php:8.3-cli-alpine',   filename: 'main.php'   },
+  perl:   { image: 'perl:slim',            filename: 'main.pl'    },
+  lua:    { image: 'nickblah/lua:5.4',     filename: 'main.lua'   },
+  r:      { image: 'r-base:latest',        filename: 'main.R'     },
+  shell:  { image: 'alpine:3.20',          filename: 'script.sh'  },
+}
 
-  // ── Python ───────────────────────────────────────────────────────────────
-  py: { image: 'python:3.12-alpine', filename: 'main.py', cmd: ['python', 'main.py'] },
+// Returns the sh -c command that reads code from stdin, writes it to /tmp,
+// then runs it. Compiled languages need extra steps (compile + run).
+function buildShCmd(filename: string): string {
+  const f = `/tmp/${filename}`
+  const base = `cat > ${f}`
 
-  // ── Go ───────────────────────────────────────────────────────────────────
-  // Redirect GOPATH/GOCACHE to /tmp (the only writable dir in a read-only container)
-  go: {
-    image: 'golang:1.23-alpine',
-    filename: 'main.go',
-    cmd: ['go', 'run', 'main.go'],
-    extraEnv: ['GOPATH=/tmp/go', 'GOCACHE=/tmp/cache', 'HOME=/tmp'],
-    timeoutMs: COMPILE_TIMEOUT,
-  },
-
-  // ── JVM ──────────────────────────────────────────────────────────────────
-  java: {
-    image: 'openjdk:21-slim',
-    filename: 'Main.java',
-    cmd: ['java', 'Main.java'],
-    timeoutMs: COMPILE_TIMEOUT,
-  },
-  // kotlinc is slow (~30-60s for Hello World); set expectations accordingly
-  kotlin: {
-    image: 'zenika/kotlin:latest',
-    filename: 'Main.kt',
-    cmd: ['sh', '-c', 'kotlinc Main.kt -include-runtime -d /tmp/main.jar 2>/dev/null && java -jar /tmp/main.jar'],
-    timeoutMs: COMPILE_TIMEOUT,
-  },
-
-  // ── C / C++ ──────────────────────────────────────────────────────────────
-  c: {
-    image: 'gcc:latest',
-    filename: 'main.c',
-    cmd: ['sh', '-c', 'gcc -o /tmp/out main.c && /tmp/out'],
-    timeoutMs: COMPILE_TIMEOUT,
-  },
-  cpp: {
-    image: 'gcc:latest',
-    filename: 'main.cpp',
-    cmd: ['sh', '-c', 'g++ -o /tmp/out main.cpp && /tmp/out'],
-    timeoutMs: COMPILE_TIMEOUT,
-  },
-
-  // ── Rust ─────────────────────────────────────────────────────────────────
-  rust: {
-    image: 'rust:alpine',
-    filename: 'main.rs',
-    cmd: ['sh', '-c', 'rustc -o /tmp/out main.rs && /tmp/out'],
-    extraEnv: ['CARGO_HOME=/tmp/cargo'],
-    timeoutMs: COMPILE_TIMEOUT,
-  },
-
-  // ── C# (Mono) ────────────────────────────────────────────────────────────
-  csharp: {
-    image: 'mono:latest',
-    filename: 'Program.cs',
-    cmd: ['sh', '-c', 'mcs -out:/tmp/prog.exe Program.cs && mono /tmp/prog.exe'],
-    timeoutMs: COMPILE_TIMEOUT,
-  },
-
-  // ── Swift ────────────────────────────────────────────────────────────────
-  swift: {
-    image: 'swift:slim',
-    filename: 'main.swift',
-    cmd: ['swift', 'main.swift'],
-    extraEnv: ['HOME=/tmp'],
-    timeoutMs: COMPILE_TIMEOUT,
-  },
-
-  // ── Scripting ────────────────────────────────────────────────────────────
-  ruby:  { image: 'ruby:3.3-alpine',      filename: 'main.rb',    cmd: ['ruby',    'main.rb'] },
-  php:   { image: 'php:8.3-cli-alpine',   filename: 'main.php',   cmd: ['php',     'main.php'] },
-  perl:  { image: 'perl:slim',            filename: 'main.pl',    cmd: ['perl',    'main.pl'] },
-  lua:   { image: 'nickblah/lua:5.4',     filename: 'main.lua',   cmd: ['lua',     'main.lua'] },
-  r:     { image: 'r-base:latest',        filename: 'main.R',     cmd: ['Rscript', 'main.R'] },
-  shell: { image: 'alpine:3.20',          filename: 'script.sh',  cmd: ['sh',      'script.sh'] },
+  if (filename === 'index.js')   return `${base} && node ${f}`
+  if (filename === 'index.jsx')  return `${base} && node ${f}`
+  if (filename === 'index.ts')   return `${base} && node --experimental-strip-types ${f}`
+  if (filename === 'index.tsx')  return `${base} && node --experimental-strip-types ${f}`
+  if (filename === 'main.py')    return `${base} && python ${f}`
+  if (filename === 'main.go')    return `${base} && cd /tmp && go run main.go`
+  if (filename === 'Main.java')  return `${base} && java ${f}`
+  if (filename === 'Main.kt')    return `${base} && kotlinc ${f} -include-runtime -d /tmp/main.jar 2>/dev/null && java -jar /tmp/main.jar`
+  if (filename === 'main.c')     return `${base} && gcc -o /tmp/out ${f} && /tmp/out`
+  if (filename === 'main.cpp')   return `${base} && g++ -o /tmp/out ${f} && /tmp/out`
+  if (filename === 'main.rs')    return `${base} && rustc -o /tmp/out ${f} && /tmp/out`
+  if (filename === 'Program.cs') return `${base} && mcs -out:/tmp/prog.exe ${f} && mono /tmp/prog.exe`
+  if (filename === 'main.swift') return `${base} && swift ${f}`
+  if (filename === 'main.rb')    return `${base} && ruby ${f}`
+  if (filename === 'main.php')   return `${base} && php ${f}`
+  if (filename === 'main.pl')    return `${base} && perl ${f}`
+  if (filename === 'main.lua')   return `${base} && lua ${f}`
+  if (filename === 'main.R')     return `${base} && Rscript ${f}`
+  if (filename === 'script.sh')  return `${base} && sh ${f}`
+  return `${base} && ${f}`
 }
 
 export async function executeCode(language: string, code: string): Promise<ExecResult> {
@@ -117,53 +79,33 @@ export async function executeCode(language: string, code: string): Promise<ExecR
     }
   }
 
-  const dir = join(tmpdir(), `coderoom-${language}-${randomBytes(6).toString('hex')}`)
-  const codeFile = join(dir, config.filename)
+  const envFlags: string[] = []
+  for (const e of config.extraEnv ?? []) envFlags.push('-e', e)
 
-  try {
-    mkdirSync(dir, { recursive: true })
-    writeFileSync(codeFile, code, 'utf8')
+  const dockerArgs = [
+    'run', '--rm', '-i',
+    '--network',     'none',
+    '--memory',      '256m',
+    '--memory-swap', '256m',
+    '--cpus',        '0.5',
+    '--read-only',
+    '--tmpfs',       '/tmp:size=256m',
+    '--stop-timeout','5',
+    ...envFlags,
+    config.image,
+    'sh', '-c', buildShCmd(config.filename),
+  ]
 
-    // Build the -e KEY=VALUE flags for extra env vars
-    const envFlags: string[] = []
-    for (const e of config.extraEnv ?? []) envFlags.push('-e', e)
-
-    const dockerArgs = [
-      'run', '--rm',
-      '--network',     'none',           // no internet access
-      '--memory',      '256m',           // RAM cap
-      '--memory-swap', '256m',           // disable swap
-      '--cpus',        '0.5',            // half a core
-      '--read-only',                     // container FS is read-only…
-      '--tmpfs',       '/tmp:size=256m', // …except /tmp (for compiled binaries)
-      '-v',            `${dir}:/code:ro`,// mount source read-only
-      '-w',            '/code',
-      '--stop-timeout','5',              // SIGTERM → SIGKILL after 5 s
-      ...envFlags,
-      config.image,
-      ...config.cmd,
-    ]
-
-    return await runProcess('docker', dockerArgs, start, config.timeoutMs ?? INTERP_TIMEOUT)
-  } catch (err: any) {
-    return {
-      output: '',
-      error: err.message ?? 'Execution failed',
-      exitCode: 1,
-      duration: Date.now() - start,
-    }
-  } finally {
-    try { rmSync(dir, { recursive: true, force: true }) } catch {}
-  }
+  return runProcess('docker', dockerArgs, code, start, config.timeoutMs ?? INTERP_TIMEOUT)
 }
 
-function runProcess(cmd: string, args: string[], start: number, timeoutMs: number): Promise<ExecResult> {
+function runProcess(cmd: string, args: string[], stdin: string, start: number, timeoutMs: number): Promise<ExecResult> {
   return new Promise((resolve) => {
-    let output  = ''
-    let error   = ''
+    let output   = ''
+    let error    = ''
     let finished = false
 
-    const child = spawn(cmd, args)
+    const child = spawn(cmd, args, { env: { ...process.env } })
 
     const finish = (code: number) => {
       if (finished) return
@@ -175,6 +117,10 @@ function runProcess(cmd: string, args: string[], start: number, timeoutMs: numbe
         duration: Date.now() - start,
       })
     }
+
+    // Write code to container stdin, then close so the cat command completes
+    child.stdin.write(stdin, 'utf8')
+    child.stdin.end()
 
     child.stdout.on('data', (chunk: Buffer) => { if (output.length < MAX_OUTPUT) output += chunk.toString() })
     child.stderr.on('data', (chunk: Buffer) => { if (error.length < MAX_OUTPUT) error += chunk.toString() })
