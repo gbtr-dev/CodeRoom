@@ -1,6 +1,3 @@
-// Utility pure per il calcolo e l'applicazione di patch testuali incrementali.
-// Usate dal frontend per sincronizzare le modifiche via socket senza
-// mandare l'intero contenuto del file ad ogni keystroke.
 
 export type TextPatch = { start: number; deleteCount: number; insert: string }
 

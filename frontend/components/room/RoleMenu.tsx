@@ -24,12 +24,6 @@ export function RoleBadge({ role }: { role: string }) {
   )
 }
 
-// Menu a tendina personalizzato per cambiare ruolo: prima era una <select>
-// nativa di 9px, illeggibile e priva di una vera freccina (appearance-none
-// senza un'icona al suo posto). Ora è un vero popover, posizionato via
-// getBoundingClientRect come il context menu del file tree, con label
-// leggibili e una descrizione per ogni ruolo.
-// MENU_HEIGHT: altezza stimata del popover (2 voci × ~44px + padding)
 const ROLE_MENU_HEIGHT = 100
 
 export function RoleMenu({ currentRole, onChange }: { currentRole: string; onChange: (r: "editor" | "viewer") => void }) {

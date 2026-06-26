@@ -4,19 +4,6 @@ import JSZip from "jszip"
 import type { Socket } from "socket.io-client"
 import type { FileNode } from "./highlight"
 
-/**
- * Tutta la logica di import/export file e progetto: export di un singolo
- * file, export dell'intero progetto come .zip, import di uno o più file
- * sciolti, e import di un intero .zip (con parsing della struttura cartelle,
- * filtro dei file binari/lock-file, e un singolo round-trip al server per
- * crearli tutti).
- *
- * Estratto da app/room/[id]/page.tsx, dove viveva mischiato con file tree,
- * editor e socket nello stesso componente. Le dipendenze (socket, file tree,
- * nome stanza) restano di proprietà del genitore e arrivano come argomenti:
- * stesso approccio già usato per useSocket, qui applicato a un dominio più
- * piccolo e isolato (non tocca lo stato dell'editor né i listener socket).
- */
 
 export interface UseImportExportArgs {
   socketRef: React.RefObject<Socket | null>

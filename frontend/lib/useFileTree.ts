@@ -3,21 +3,6 @@ import type { Socket } from "socket.io-client"
 import type { FileNode } from "./highlight"
 import type { Creating, Menu } from "@/components/room/FileTree"
 
-/**
- * Le mutazioni del file tree: toggle di una cartella, creazione, rename,
- * delete e move (drag&drop) di file/cartelle. Ogni mutazione aggiorna prima
- * lo stato locale (`nodes`) in modo ottimistico, poi notifica il server via
- * socket — gli altri client convergono sullo stesso stato tramite gli
- * eventi "file-created/renamed/deleted/moved" gestiti in useSocket.
- *
- * Estratto da app/room/[id]/page.tsx, dove viveva mischiato con editor,
- * import/export e socket nello stesso componente. Lo stato dei tab aperti
- * (openTabs/activeId) resta di proprietà del genitore — arriva qui solo
- * perché deleteNode deve chiudere i tab dei file cancellati — così come
- * dragId/dropTarget e i popup di menu/creazione/rename, che sono UI dello
- * stesso file tree ma vivono nel genitore insieme al resto dei popup della
- * pagina (context menu, plus menu, export menu).
- */
 
 export interface UseFileTreeArgs {
   nodes: FileNode[]

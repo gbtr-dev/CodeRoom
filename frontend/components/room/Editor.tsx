@@ -5,21 +5,6 @@ import type { Lang, RemoteParticipant } from "@/lib/highlight"
 import { LANG_META } from "@/lib/highlight"
 import { FilePlusIcon } from "@/components/room/Icons"
 
-/**
- * L'area dell'editor: gutter virtualizzato con numeri di riga, syntax
- * highlight (layer <pre> sotto la textarea trasparente), cursori remoti e
- * status bar in fondo. Include anche lo stato vuoto mostrato quando nessun
- * file è aperto.
- *
- * Estratto da app/room/[id]/page.tsx, dove viveva inline nel componente
- * "God Component" della room. Tutto lo stato (contenuto, scroll, riga/colonna
- * attiva, cache di highlight) resta nel genitore — qui arrivano solo i
- * valori derivati e i ref/handler necessari a disegnare e a reagire agli
- * eventi della textarea. Questo evita di spostare anche la logica di sync
- * col socket (debounce, patch testuali, throttle del cursore), che non è
- * responsabilità del rendering dell'editor.
- */
-
 export const LINE_HEIGHT = 22
 export const CHAR_WIDTH = 8.4
 export const GUTTER = 56
@@ -124,12 +109,6 @@ export function Editor({
       >
         <div ref={setEditorViewportRef} className="flex h-full">
           {/* gutter */}
-          {/* Virtualizzato — invece di Array.from({ length: lineCount }) (un
-              <div> per ogni riga del file, anche fuori schermo), si renderizza
-              solo il range [gutterRange.start, gutterRange.end), con overscan,
-              e si trasla il blocco con `top` per simulare la posizione
-              corretta. overflow resta hidden: lo "scroll" del gutter è
-              interamente simulato via offset, non via scrollTop. */}
           <div ref={gutterRef} className="relative shrink-0 select-none overflow-hidden" style={{ width: GUTTER, background: '#0d0d0d' }} aria-hidden="true">
             <div style={{ position: 'absolute', top: 12 + gutterRange.start * LINE_HEIGHT - scroll.top, left: 0, right: 0 }}>
               {Array.from({ length: gutterRange.end - gutterRange.start }, (_, i) => {

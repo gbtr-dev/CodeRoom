@@ -7,15 +7,6 @@ import type { Role } from "@/lib/useSocket"
 import { ChevronIcon, CloseIcon } from "@/components/room/Icons"
 import { RoleBadge, RoleMenu } from "@/components/room/RoleMenu"
 
-/**
- * Sezione "Participants" della sidebar: utente corrente + lista remoti, con
- * badge/menu di ruolo e azione di kick per l'owner.
- *
- * Estratto da app/room/[id]/page.tsx, dove viveva inline nel componente
- * della room. Lo stato resta dove era: partsOpen e il target del kick sono
- * gestiti dal genitore (il secondo perché apre un dialog di conferma
- * condiviso con altre azioni, non solo questa lista).
- */
 export function ParticipantList({
   user,
   myRole,

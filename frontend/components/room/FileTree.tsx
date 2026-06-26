@@ -10,18 +10,6 @@ import {
 } from "@/components/room/Icons"
 import { MenuItem, InlineEntry } from "@/components/room/FileTreeHelpers"
 
-/**
- * Sidebar "Explorer": header con il menu "+" (nuovo file/cartella, import,
- * export) e l'albero dei file con drag&drop, rename inline e creazione
- * inline. Esporta anche FileTreeContextMenu, il menu contestuale al click
- * destro su un nodo — vive qui perché condivide stato e azioni con l'albero.
- *
- * Estratto da app/room/[id]/page.tsx, dov'era la parte più grossa del "God
- * Component" della room. Stato e logica (creazione, rename, delete, move,
- * import/export) restano nel genitore: qui arrivano solo come props, stesso
- * approccio già usato per KnockQueue e ParticipantList.
- */
-
 export type Menu = { x: number; y: number; nodeId: string }
 export type Creating = { parentId: string; kind: "file" | "folder" }
 

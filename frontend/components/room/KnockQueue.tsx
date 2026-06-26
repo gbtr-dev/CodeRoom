@@ -5,16 +5,6 @@ import type React from "react"
 import type { Socket } from "socket.io-client"
 import type { Knock } from "@/lib/useSocket"
 
-/**
- * Tutto ciò che riguarda il "knock system" (richiesta d'accesso a una room
- * privata) lato UI: la schermata di attesa per chi ha bussato, la schermata
- * di rifiuto, e il pannello con cui l'owner approva/nega le richieste.
- *
- * Estratto da app/room/[id]/page.tsx: era inline nel componente "God
- * Component" della room. Lo stato (knockQueue/knockStatus) resta dove era —
- * gestito da useSocket — questo file riceve solo le props necessarie a
- * disegnare e a reagire ai click.
- */
 
 /* ------------------------------------------------------------------ */
 /* Schermata inserimento password                                      */

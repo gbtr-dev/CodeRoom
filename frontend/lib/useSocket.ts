@@ -34,28 +34,13 @@ type IncomingFile = {
   language?: string
 }
 
-/**
- * Tutto ciò che l'hook deve poter toccare al di fuori del proprio dominio
- * (connessione, partecipanti, ruolo, knock, output del terminale) — cioè
- * file tree ed editor, che restano di competenza del componente chiamante.
- * Passare callback invece di spostare anche quello stato qui dentro tiene
- * questo primo step di refactoring contenuto e a basso rischio: l'editor e
- * il file tree non cambiano forma, cambia solo dove vive la logica socket.
- */
 export interface UseSocketCallbacks {
-  /** Sostituisce l'intero file tree (arrivo di room-state o files-imported). */
   setNodes: (updater: FileNode[] | ((prev: FileNode[]) => FileNode[])) => void
-  /** Aggiorna il contenuto mostrato nell'editor se il file aggiornato è quello attivo. */
   setActiveContent: (updater: string | ((prev: string) => string)) => void
-  /** Letto per sapere se il file aggiornato da remoto è quello correntemente apert */
   activeIdRef: { current: string }
-  /** Cache locale "ultimo contenuto sincronizzato per fileId", da tenere aggiornata. */
   lastSyncedContent: { current: Record<string, string> }
-  /** Cache dei contenuti originali per-file, usata da file-created. */
   originals: { current: Record<string, string> }
-  /** True mentre è in corso un import ZIP: sospende l'auto-apertura dei file creati. */
   importingRef: { current: boolean }
-  /** Apre un file nell'editor (gestito dal file tree). */
   openFile: (id: string) => void
   setOutput: (lines: OutputLine[]) => void
   setRunning: (running: boolean) => void
@@ -81,17 +66,7 @@ export interface UseSocketResult {
   sendChatMessage: (content: string) => void
 }
 
-/**
- * Gestisce l'intero ciclo di vita della connessione Socket.IO per una room:
- * connessione/riconnessione, join, e tutti gli eventi in arrivo dal server
- * (partecipanti, ruoli, knock, sync del codice, run del codice, file tree).
- *
- * Estratto da app/room/[id]/page.tsx: prima viveva come un singolo
- * useEffect di ~270 righe dentro al componente "God Component" della room,
- * mischiato con editor, file tree, drag&drop e terminal. Tenerlo qui
- * significa che una modifica al protocollo socket non tocca più lo stesso
- * file dell'editor.
- */
+
 export function useSocket(
   roomId: string,
   ready: boolean,
@@ -113,11 +88,6 @@ export function useSocket(
   const [roomHasPassword, setRoomHasPassword] = useState(false)
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
 
-  // Le callback cambiano identità a ogni render del padre (sono closure su
-  // stato/ref che vivono lì). Le teniamo in un ref per non dover rilanciare
-  // l'intero effect — che disconnetterebbe e riconnetterebbe il socket — ad
-  // ogni render. L'effect sotto resta legato solo a [ready, user, roomId],
-  // esattamente come prima dell'estrazione.
   const cb = useRef(callbacks)
   cb.current = callbacks
 
@@ -205,21 +175,9 @@ export function useSocket(
           .map((p) => ({ ...p, fileId: cb.current.activeIdRef.current, dbUserId: p.dbUserId, dbRole: p.dbRole as any, avatar: (p as any).avatar ?? null })),
       )
       if (incomingRole) setMyRole(incomingRole as Role)
-      // room-state arriva sia all'ingresso diretto sia subito dopo che
-      // l'owner approva un knock: in quel secondo caso knockStatus è ancora
-      // "pending" e bloccherebbe il render sulla schermata di attesa anche
-      // se i dati della room sono già qui, finché l'utente non ricarica.
+      
       setKnockStatus("idle")
 
-      // Rimuovi ?new dalla URL dopo il primo join riuscito. Se non lo
-      // facessimo, una riconnessione automatica di Socket.IO (rete instabile,
-      // tab in background, ecc.) rileggerebbe isNew=true da
-      // window.location.search nell'handler "connect" e rimanderebbe
-      // join-room con isNew: true. Sul server INSERT OR IGNORE evita di
-      // duplicare la room, ma l'utente verrebbe re-aggiunto come owner anche
-      // se era già membro, e questo room-state risetterebbe di nuovo lo
-      // stato React (files, participants, role) sovrascrivendo eventuali
-      // modifiche locali non ancora sincronizzate.
       if (!newFlagClearedRef.current) {
         newFlagClearedRef.current = true
         const url = new URL(window.location.href)
@@ -267,11 +225,9 @@ export function useSocket(
     })
 
     socket.on("code-update", ({ fileId, content, fromSocketId }: { fileId: string; content: string; fromSocketId?: string }) => {
-      // Always update the sync baseline so future patches are computed from
-      // the authoritative server state, even after a concurrent write.
+
       cb.current.lastSyncedContent.current[fileId] = content
-      // Skip editor update for our own echoed writes — the editor already
-      // shows the correct content and updating it would reset the cursor.
+
       if (fromSocketId === socket.id) return
       cb.current.setNodes((prev) => prev.map((n) => (n.id === fileId ? { ...n, content } : n)))
       cb.current.setActiveContent((cur) => {

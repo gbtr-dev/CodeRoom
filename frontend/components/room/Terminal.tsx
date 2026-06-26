@@ -4,16 +4,6 @@ import type React from "react"
 import type { OutputLine } from "@/lib/useSocket"
 import { TerminalIcon, MaximizeIcon } from "@/components/room/Icons"
 
-/**
- * Pannello "Output" sotto l'editor: header con stato di esecuzione e azioni
- * (expand/collapse, clear), e il log delle righe prodotte dall'esecuzione
- * del codice.
- *
- * Estratto da app/room/[id]/page.tsx, dove viveva inline nel componente
- * della room. Lo stato (output, running, outputExpanded, panelHeight) resta
- * nel genitore — l'altezza del pannello è condivisa con il resize handle
- * trascinabile sopra di esso, quindi non ha senso isolarla qui dentro.
- */
 export function Terminal({
   output,
   running,
