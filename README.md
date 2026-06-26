@@ -30,6 +30,13 @@ Real-time collaborative development environment. Multiple users can write code t
 - Warm container pool for interpreted languages (JS, Python, Ruby…) — near-instant execution after first run
 - Output appears in the integrated terminal panel
 
+### Code formatting
+- Format button in the toolbar formats the active file in one click
+- JS, JSX, TS, TSX, CSS, HTML, JSON, Markdown — formatted via Prettier (runs in the backend process, instant)
+- Go — formatted via `gofmt` in a Docker container
+- Rust — formatted via `rustfmt` in a Docker container
+- Formatted code is synced live to all participants in the room
+
 ### Import & Export
 - Drop a ZIP to import an entire project — restores the full folder structure
 - Download your workspace as a ZIP snapshot at any moment

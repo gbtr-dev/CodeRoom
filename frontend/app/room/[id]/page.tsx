@@ -58,6 +58,8 @@ import ChatPanel from "@/components/ChatPanel"
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001"
 
+const FMT_LANGS = new Set(['js', 'jsx', 'ts', 'tsx', 'css', 'html', 'json', 'md', 'py', 'go', 'rust'])
+
 export default function CoderoomPage() {
   const params = useParams<{ id: string }>()
   const router = useRouter()
@@ -111,6 +113,7 @@ export default function CoderoomPage() {
   const [stdinModal, setStdinModal] = useState(false)
   const [stdinValue, setStdinValue] = useState("")
   const [stdinFields, setStdinFields] = useState<string[]>([])
+  const [formatting, setFormatting] = useState(false)
 
   const [activeLine, setActiveLine] = useState(1)
   const [activeCol, setActiveCol] = useState(0)
@@ -194,6 +197,12 @@ export default function CoderoomPage() {
     setRunning,
     setProgress,
     outputEndRef,
+    setFormatting,
+    applyFormat: (code: string) => {
+      if (!activeIdRef.current) return
+      setActiveContent(code)
+      lastSyncedContent.current[activeIdRef.current] = code
+    },
   })
 
   useEffect(() => { setLockHasPassword(roomHasPassword) }, [roomHasPassword])
@@ -837,6 +846,13 @@ export default function CoderoomPage() {
     setStdinModal(true)
   }
 
+  function format() {
+    if (!activeNode || !canEdit) return
+    if (!activeContent.trim()) return
+    setFormatting(true)
+    socketRef.current?.emit("format-code", { language: lang, code: activeContent })
+  }
+
   function extractInputPrompts(code: string, language: string): string[] {
     const prompts: string[] = []
     if (language === 'py') {
@@ -1167,6 +1183,20 @@ export default function CoderoomPage() {
             )}
           </button>
 
+          {canEdit && FMT_LANGS.has(lang) && (
+            <button
+              onClick={format}
+              disabled={formatting || running}
+              className="flex items-center gap-1.5 rounded-md border border-[#1e1e1e] px-3 py-1.5 font-sans text-[12px] font-medium text-neutral-400 transition-all hover:border-[#2e2e2e] hover:text-neutral-200 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {formatting ? (
+                <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-neutral-600 border-t-neutral-300" />
+              ) : (
+                <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M21 10H3M21 6H3M21 14H3M21 18H3"/></svg>
+              )}
+              <span>{formatting ? "Formatting…" : "Format"}</span>
+            </button>
+          )}
           {canEdit && (
             <button
               onClick={run}

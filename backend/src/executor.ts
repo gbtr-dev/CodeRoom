@@ -1,4 +1,5 @@
 import { spawn } from 'child_process'
+import { format as prettierFormat } from 'prettier'
 
 type ExecResult = { output: string; error: string; exitCode: number; duration: number }
 
@@ -182,6 +183,59 @@ export async function executeCode(language: string, code: string, stdin?: string
     ],
     stdinPayload, start, timeoutMs
   )
+}
+
+// ── Formatter ─────────────────────────────────────────────────────────────────
+
+// Prettier parser per linguaggio — usato direttamente nel processo Node.js
+const PRETTIER_PARSERS: Record<string, string> = {
+  js: 'babel', jsx: 'babel', ts: 'typescript', tsx: 'typescript',
+  css: 'css', html: 'html', json: 'json', md: 'markdown',
+}
+
+// Linguaggi formattati via Docker (tool già presenti nell'immagine, no download)
+type DockerFmt = { image: string; cmd: string }
+const DOCKER_FMTS: Record<string, DockerFmt> = {
+  go:   { image: 'golang:1.23-alpine', cmd: 'gofmt' },
+  rust: { image: 'rust:alpine',        cmd: 'rustfmt --edition 2021' },
+}
+
+export async function formatCode(language: string, code: string): Promise<{ formatted: string; error: string }> {
+  // JS/TS/CSS/HTML/JSON/MD — usa prettier API direttamente nel processo
+  const parser = PRETTIER_PARSERS[language]
+  if (parser) {
+    try {
+      const formatted = await prettierFormat(code, { parser, printWidth: 100, singleQuote: true, semi: true, tabWidth: 2 })
+      return { formatted, error: '' }
+    } catch (err: any) {
+      return { formatted: code, error: err.message ?? 'Prettier error' }
+    }
+  }
+
+  // Go / Rust — gofmt e rustfmt sono già nell'immagine, nessun download
+  const dockerFmt = DOCKER_FMTS[language]
+  if (dockerFmt) {
+    const result = await runProcess(
+      'docker',
+      [
+        'run', '--rm', '-i',
+        '--network',     'none',
+        '--memory',      '128m',
+        '--memory-swap', '128m',
+        '--cpus',        '0.5',
+        '--read-only',
+        '--tmpfs',       '/tmp:size=64m',
+        '--stop-timeout','5',
+        dockerFmt.image,
+        'sh', '-c', dockerFmt.cmd,
+      ],
+      code, Date.now(), 15_000
+    )
+    if (result.exitCode !== 0) return { formatted: code, error: result.error }
+    return { formatted: result.output, error: '' }
+  }
+
+  return { formatted: code, error: '' }
 }
 
 function runProcess(cmd: string, args: string[], stdin: string, start: number, timeoutMs: number): Promise<ExecResult> {

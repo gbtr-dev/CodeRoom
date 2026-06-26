@@ -61,6 +61,8 @@ export interface UseSocketCallbacks {
   setRunning: (running: boolean) => void
   setProgress: (progress: boolean) => void
   outputEndRef: { current: HTMLDivElement | null }
+  setFormatting: (v: boolean) => void
+  applyFormat: (code: string) => void
 }
 
 export interface UseSocketResult {
@@ -335,6 +337,14 @@ export function useSocket(
       setTimeout(() => cb.current.outputEndRef.current?.scrollIntoView({ behavior: "smooth" }), 50)
     })
 
+    socket.on("format-result", ({ formatted, error }: { formatted: string; error: string }) => {
+      cb.current.setFormatting(false)
+      if (!error && formatted && cb.current.activeIdRef.current) {
+        cb.current.applyFormat(formatted)
+        socket.emit("code-update", { fileId: cb.current.activeIdRef.current, content: formatted })
+      }
+    })
+
     socket.on("file-created", ({ node, parentId }: { node: IncomingFile; parentId: string | null }) => {
       const newNode: FileNode = {
         id: node.id,
@@ -419,6 +429,7 @@ export function useSocket(
       socket.off("cursor-update")
       socket.off("run-started")
       socket.off("run-result")
+      socket.off("format-result")
       socket.off("file-created")
       socket.off("file-deleted")
       socket.off("file-renamed")

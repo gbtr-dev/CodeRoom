@@ -12,7 +12,7 @@ import {
   removeRoom,
   hasOnlineOwner,
 } from './rooms'
-import { executeCode } from './executor'
+import { executeCode, formatCode } from './executor'
 import { dbRoomExists, dbAddRoomMember, dbCreateRoom, dbGetUserById, dbSetRoomName, dbGetRoom, dbGetMemberRole, dbSetMemberRole, dbGetRoomMembers, dbRemoveMember, dbRenameFile, dbMoveFile, dbSaveChatMessage, dbGetChatMessages, type RoomRole } from './db'
 import { verifySessionToken, SESSION_COOKIE_NAME } from './auth'
 import bcrypt from 'bcryptjs'
@@ -465,6 +465,17 @@ export function registerSocketHandlers(io: Server) {
         duration: result.duration,
         language,
       })
+    })
+
+    safeOn(socket, 'format-code', async ({ language, code }: { language: string; code: string }) => {
+      if (!checkRateLimit(socket, 'format-code')) return
+      if (!isString(language)) return
+      if (!isBoundedString(code, LIMITS.RUN_CODE)) return
+      if (!currentRoom) return
+      if (getRole(socket) === 'viewer') return
+
+      const result = await formatCode(language, code)
+      socket.emit('format-result', result)
     })
 
     // Owner-only: change a member's role
