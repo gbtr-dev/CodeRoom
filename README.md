@@ -16,6 +16,7 @@ Real-time collaborative development environment. Multiple users can write code t
 - Full nested file/folder tree shared live
 - Create, rename, move and delete files and folders in real time
 - Multiple tabs open at once
+- Project-wide search — find text across all files instantly from the sidebar
 
 ### Syntax highlighting
 - Custom-built engine covering 20+ languages (JS, TS, Python, Go, Rust, Java, C/C++, HTML, CSS, SQL, JSON, Markdown…)
@@ -25,6 +26,8 @@ Real-time collaborative development environment. Multiple users can write code t
 - Run code in 19 languages directly from the room via Docker-isolated containers
 - Each language runs in its own official Docker image with `--network none`, memory cap and read-only filesystem
 - Supported: JS, JSX, TS, TSX, Python, Go, Java, C, C++, Rust, C#, Ruby, PHP, Perl, Lua, Shell, Swift, Kotlin, R
+- Stdin support — provide program input before execution via a labeled input modal
+- Warm container pool for interpreted languages (JS, Python, Ruby…) — near-instant execution after first run
 - Output appears in the integrated terminal panel
 
 ### Import & Export
