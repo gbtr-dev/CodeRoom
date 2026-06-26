@@ -13,9 +13,6 @@ const INTERP_TIMEOUT  = 15_000
 const COMPILE_TIMEOUT = 60_000
 const MAX_OUTPUT      = 100_000
 
-// Each entry defines the image and filename; the docker command is always
-// `sh -c "cat > /tmp/<filename> && <run command>"` so code arrives via stdin
-// and no host volume mount is needed (works with remote Docker daemons too).
 const LANG_CONFIGS: Record<string, LangConfig> = {
   js:     { image: 'node:22-alpine',       filename: 'index.js'   },
   jsx:    { image: 'node:22-alpine',       filename: 'index.jsx'  },
@@ -38,12 +35,9 @@ const LANG_CONFIGS: Record<string, LangConfig> = {
   shell:  { image: 'alpine:3.20',          filename: 'script.sh'  },
 }
 
-// Returns the sh -c command that reads code from stdin, writes it to /tmp,
-// then runs it. Compiled languages need extra steps (compile + run).
 function buildShCmd(filename: string): string {
   const f = `/tmp/${filename}`
   const base = `cat > ${f}`
-
   if (filename === 'index.js')   return `${base} && node ${f}`
   if (filename === 'index.jsx')  return `${base} && node ${f}`
   if (filename === 'index.ts')   return `${base} && node --experimental-strip-types ${f}`
@@ -66,37 +60,123 @@ function buildShCmd(filename: string): string {
   return `${base} && ${f}`
 }
 
+// ── Warm container pool ───────────────────────────────────────────────────────
+
+// Only pre-warm interpreted languages — compiled ones have long run times
+// anyway so the container startup overhead is negligible by comparison.
+const WARM_LANGUAGES = ['js', 'jsx', 'ts', 'tsx', 'py', 'ruby', 'php', 'perl', 'lua', 'shell']
+const POOL_SIZE = 2
+
+const pool = new Map<string, string[]>()
+
+function dockerCmd(args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('docker', args, { env: { ...process.env } })
+    let out = ''
+    let err = ''
+    child.stdout.on('data', (d: Buffer) => { out += d.toString() })
+    child.stderr.on('data', (d: Buffer) => { err += d.toString() })
+    child.on('close', (code) => code === 0 ? resolve(out.trim()) : reject(new Error(err.trim())))
+    child.on('error', reject)
+  })
+}
+
+async function spawnWarmContainer(language: string): Promise<string | null> {
+  const config = LANG_CONFIGS[language]
+  if (!config) return null
+  const envFlags: string[] = []
+  for (const e of config.extraEnv ?? []) envFlags.push('-e', e)
+  try {
+    const id = await dockerCmd([
+      'run', '-d', '--rm',
+      '--network',     'none',
+      '--memory',      '256m',
+      '--memory-swap', '256m',
+      '--cpus',        '0.5',
+      '--read-only',
+      '--tmpfs',       '/tmp:size=256m',
+      '--stop-timeout','5',
+      ...envFlags,
+      config.image,
+      'sleep', 'infinity',
+    ])
+    return id
+  } catch {
+    return null
+  }
+}
+
+async function fillPool(language: string) {
+  const current = pool.get(language) ?? []
+  const needed = POOL_SIZE - current.length
+  if (needed <= 0) return
+  const ids = await Promise.all(Array.from({ length: needed }, () => spawnWarmContainer(language)))
+  const valid = ids.filter((id): id is string => id !== null)
+  pool.set(language, [...current, ...valid])
+}
+
+function killContainer(id: string) {
+  spawn('docker', ['rm', '-f', id], { env: { ...process.env } }).on('error', () => {})
+}
+
+async function acquireContainer(language: string): Promise<string | null> {
+  const available = pool.get(language) ?? []
+  const id = available.shift() ?? null
+  pool.set(language, available)
+  fillPool(language).catch(() => {})
+  return id
+}
+
+export async function initContainerPool() {
+  await Promise.all(WARM_LANGUAGES.map(lang => fillPool(lang)))
+}
+
+// ── Execution ─────────────────────────────────────────────────────────────────
+
 export async function executeCode(language: string, code: string): Promise<ExecResult> {
   const start = Date.now()
   const config = LANG_CONFIGS[language]
 
   if (!config) {
-    return {
-      output: '',
-      error: `Language "${language}" is not supported for execution.`,
-      exitCode: 1,
-      duration: 0,
+    return { output: '', error: `Language "${language}" is not supported for execution.`, exitCode: 1, duration: 0 }
+  }
+
+  const shCmd = buildShCmd(config.filename)
+  const timeoutMs = config.timeoutMs ?? INTERP_TIMEOUT
+
+  if (WARM_LANGUAGES.includes(language)) {
+    const containerId = await acquireContainer(language)
+    if (containerId) {
+      const result = await runProcess(
+        'docker', ['exec', '-i', containerId, 'sh', '-c', shCmd],
+        code, start, timeoutMs
+      )
+      killContainer(containerId)
+      return result
     }
   }
 
+  // Fallback: cold docker run
   const envFlags: string[] = []
   for (const e of config.extraEnv ?? []) envFlags.push('-e', e)
 
-  const dockerArgs = [
-    'run', '--rm', '-i',
-    '--network',     'none',
-    '--memory',      '256m',
-    '--memory-swap', '256m',
-    '--cpus',        '0.5',
-    '--read-only',
-    '--tmpfs',       '/tmp:size=256m',
-    '--stop-timeout','5',
-    ...envFlags,
-    config.image,
-    'sh', '-c', buildShCmd(config.filename),
-  ]
-
-  return runProcess('docker', dockerArgs, code, start, config.timeoutMs ?? INTERP_TIMEOUT)
+  return runProcess(
+    'docker',
+    [
+      'run', '--rm', '-i',
+      '--network',     'none',
+      '--memory',      '256m',
+      '--memory-swap', '256m',
+      '--cpus',        '0.5',
+      '--read-only',
+      '--tmpfs',       '/tmp:size=256m',
+      '--stop-timeout','5',
+      ...envFlags,
+      config.image,
+      'sh', '-c', shCmd,
+    ],
+    code, start, timeoutMs
+  )
 }
 
 function runProcess(cmd: string, args: string[], stdin: string, start: number, timeoutMs: number): Promise<ExecResult> {
@@ -118,7 +198,6 @@ function runProcess(cmd: string, args: string[], stdin: string, start: number, t
       })
     }
 
-    // Write code to container stdin, then close so the cat command completes
     child.stdin.write(stdin, 'utf8')
     child.stdin.end()
 

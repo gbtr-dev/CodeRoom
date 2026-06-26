@@ -10,6 +10,7 @@ import { csrfOriginCheck } from './csrf'
 import { flushAllRoomContent } from './rooms'
 import { dbDeleteExpiredSessions, dbDeleteExpiredLoginAttempts, dbDeleteExpiredInvites } from './db'
 import { createLogger } from './logger'
+import { initContainerPool } from './executor'
 
 
 const log = createLogger('SERVER')
@@ -106,5 +107,6 @@ app.listen({ port: 45032, host: '0.0.0.0' }, (err) => {
   })
 
   registerSocketHandlers(io)
-  log.info('Backend avviato', { url: 'http://localhost:3001' })
+  log.info('Backend avviato', { url: 'http://localhost:45032' })
+  initContainerPool().catch((err) => log.error('Errore init container pool', { error: String(err) }))
 })
