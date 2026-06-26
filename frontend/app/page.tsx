@@ -935,7 +935,7 @@ export default function LandingPage() {
       {/* ── Footer ── */}
       <FadeIn className="relative z-10 mt-auto">
         <footer className="flex h-[58px] items-center justify-between border-t border-white/5 px-7 text-[12px] text-[#333]">
-          <span>Built by <span className="text-[#555]">Luca and Alberto</span></span>
+          <span>Built by <span className="text-[#555]">Luca</span></span>
 
         </footer>
       </FadeIn>
