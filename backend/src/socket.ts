@@ -19,7 +19,7 @@ import bcrypt from 'bcryptjs'
 import { createLogger } from './logger'
 import { checkRateLimit } from './rateLimiter'
 import { safeOn } from './safeHandler'
-import { LIMITS, isString, isNonEmptyString, isBoundedString, isValidId, isNonNegativeInt, isFileKind } from './validation'
+import { LIMITS, isString, isNonEmptyString, isBoundedString, isValidId, isNonNegativeInt, isFileKind, isValidFileName } from './validation'
 
 
 const log = createLogger('SOCKET')
@@ -389,7 +389,7 @@ export function registerSocketHandlers(io: Server) {
       const reject = () => { if (typeof callback === 'function') callback(undefined as unknown as ReturnType<typeof createFile>) }
       if (!checkRateLimit(socket, 'create-file')) { reject(); return }
       if (parentId !== null && !isValidId(parentId)) { reject(); return }
-      if (!isNonEmptyString(name, LIMITS.FILE_NAME)) { reject(); return }
+      if (!isValidFileName(name)) { reject(); return }
       if (!isFileKind(type)) { reject(); return }
       if (content !== undefined && !isBoundedString(content, LIMITS.FILE_CONTENT)) { reject(); return }
       if (!currentRoom) return
@@ -420,7 +420,7 @@ export function registerSocketHandlers(io: Server) {
 
         if (!isValidId(tempId)) continue
         if (parentTempId !== null && parentTempId !== undefined && !isValidId(parentTempId)) continue
-        if (!isNonEmptyString(name, LIMITS.FILE_NAME)) continue
+        if (!isValidFileName(name)) continue
         if (!isFileKind(type)) continue
         if (content !== undefined && !isBoundedString(content, LIMITS.FILE_CONTENT)) continue
 
@@ -557,7 +557,7 @@ export function registerSocketHandlers(io: Server) {
     safeOn(socket, 'rename-file', ({ fileId, name }: { fileId: string; name: string }) => {
       if (!checkRateLimit(socket, 'rename-file')) return
       if (!isValidId(fileId)) return
-      if (!isString(name)) return
+      if (!isValidFileName(name)) return
       if (!currentRoom) return
       if (getRole(socket) === 'viewer') return
       const trimmed = name.trim().slice(0, LIMITS.FILE_NAME)
@@ -597,6 +597,8 @@ export function registerSocketHandlers(io: Server) {
     safeOn(socket, 'disconnect', () => {
       const ownKnock = pendingKnocks.get(socket.id)
       if (ownKnock) { clearTimeout(ownKnock.timeoutId); pendingKnocks.delete(socket.id) }
+      delete socket.data.__rateBuckets
+      delete socket.data.__abuseBudget
       if (!currentRoom || !socket.data.admitted) return
       if (currentUserId) untrackUserSocket(currentRoom, currentUserId, socket)
       const wasOwner = getRole(socket) === 'owner'

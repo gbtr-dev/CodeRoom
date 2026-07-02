@@ -292,7 +292,7 @@ function LoginInner() {
     e.preventDefault()
     setError(null)
     if (mode === "signup" && name.trim().length < 2) { setError("Please enter your name."); return }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { setError("Please enter a valid email address."); return }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) { setError("Please enter a valid email address."); return }
     if (password.length < 6) { setError("Password must be at least 6 characters."); return }
     setLoading(true)
     try {

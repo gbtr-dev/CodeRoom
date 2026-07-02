@@ -146,7 +146,7 @@ export async function registerAuthRoutes(app: FastifyInstance) {
     const normalizedEmail = email.toLowerCase().trim()
     const existing = dbGetUserByEmail(normalizedEmail)
     if (existing) {
-      log.warn('Signup failed — email already in use', { name: name.trim(), email: normalizedEmail })
+      log.warn('Signup failed — email already in use', { name: name.trim(), email: maskEmail(normalizedEmail) })
       return reply.status(409).send({ error: 'Email already in use' })
     }
 
@@ -154,7 +154,7 @@ export async function registerAuthRoutes(app: FastifyInstance) {
     const passwordHash = await bcrypt.hash(password, 10)
     dbCreateUser(id, name.trim(), normalizedEmail, passwordHash)
 
-    log.info('Signup successful', { userId: id, name: name.trim(), email: normalizedEmail })
+    log.info('Signup successful', { userId: id, name: name.trim(), email: maskEmail(normalizedEmail) })
     const { token } = createSession(id)
     reply.setCookie(SESSION_COOKIE_NAME, token, sessionCookieOptions(SESSION_TTL_SECONDS))
     return reply.send({ user: { id, name: name.trim(), email: normalizedEmail } })
@@ -199,7 +199,7 @@ export async function registerAuthRoutes(app: FastifyInstance) {
     }
 
     recordLoginSuccess(normalizedEmail)
-    log.info('Login successful', { userId: user.id, name: user.name, email: user.email })
+    log.info('Login successful', { userId: user.id, name: user.name, email: maskEmail(user.email) })
     const { token } = createSession(user.id)
     reply.setCookie(SESSION_COOKIE_NAME, token, sessionCookieOptions(SESSION_TTL_SECONDS))
     return reply.send({ user: { id: user.id, name: user.name, email: user.email } })

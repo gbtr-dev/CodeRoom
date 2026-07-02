@@ -40,8 +40,18 @@ export function isFileKind(v: unknown): v is 'file' | 'folder' {
   return v === 'file' || v === 'folder'
 }
 
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/
 
 export function isValidEmail(v: unknown): v is string {
   return isNonEmptyString(v, LIMITS.EMAIL) && EMAIL_RE.test(v)
+}
+
+// Rejects path traversal chars, null bytes, and control characters in file names
+const INVALID_FILENAME_RE = /[/\\<>:"|?*\x00-\x1f]/
+
+export function isValidFileName(v: unknown): v is string {
+  if (!isNonEmptyString(v, LIMITS.FILE_NAME)) return false
+  const trimmed = (v as string).trim()
+  if (!trimmed || trimmed === '.' || trimmed === '..') return false
+  return !INVALID_FILENAME_RE.test(trimmed)
 }
