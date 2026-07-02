@@ -82,7 +82,7 @@ export function disconnectAllUserSockets(userId: string) {
   }
 }
 
-const pendingKnocks = new Map<string, { userId: string | null; userName: string; roomId: string }>()
+const pendingKnocks = new Map<string, { userId: string | null; userName: string; roomId: string; timeoutId: ReturnType<typeof setTimeout> }>()
 
 export function registerSocketHandlers(io: Server) {
   ioInstance = io
@@ -95,6 +95,7 @@ export function registerSocketHandlers(io: Server) {
 
     function admitUser(roomId: string, admittedSocket: Socket, admittedUserId: string | null, admittedName: string, admittedEmail: string, admittedAvatar?: string | null) {
       admittedSocket.join(roomId)
+      admittedSocket.data.admitted = true
 
       let role: RoomRole = 'viewer'
       if (admittedUserId) {
@@ -193,6 +194,7 @@ export function registerSocketHandlers(io: Server) {
         // Creator: create room and add owner atomically (prevents race on concurrent join)
         dbCreateRoomWithOwner(roomId, currentUserId, isString(roomName) ? roomName : undefined)
         socket.join(roomId)
+        socket.data.admitted = true
 
         let role: RoomRole = 'viewer'
         if (currentUserId) {
@@ -268,7 +270,14 @@ export function registerSocketHandlers(io: Server) {
       }
 
       // No password — send knock to all owners currently in the room
-      pendingKnocks.set(socket.id, { userId: currentUserId, userName: currentUser, roomId })
+      const knockTimeoutId = setTimeout(() => {
+        if (pendingKnocks.has(socket.id)) {
+          pendingKnocks.delete(socket.id)
+          socket.emit('knock-denied')
+          log.info(`[ROOM] Knock expired — user = ${currentUser} | room = ${roomId}`)
+        }
+      }, 60_000)
+      pendingKnocks.set(socket.id, { userId: currentUserId, userName: currentUser, roomId, timeoutId: knockTimeoutId })
       log.info(`[ROOM] Knock received — user = ${currentUser} | email = ${currentUserEmail} | room = ${roomId}`)
 
       const room = getOrCreateRoom(roomId)
@@ -301,6 +310,7 @@ export function registerSocketHandlers(io: Server) {
 
       const knock = pendingKnocks.get(knockId)
       if (!knock) return
+      clearTimeout(knock.timeoutId)
       pendingKnocks.delete(knockId)
 
       const knockerSocket = io.sockets.sockets.get(knockId)
@@ -320,6 +330,7 @@ export function registerSocketHandlers(io: Server) {
 
       const knock = pendingKnocks.get(knockId)
       if (!knock) return
+      clearTimeout(knock.timeoutId)
       pendingKnocks.delete(knockId)
 
       const knockerSocket = io.sockets.sockets.get(knockId)
@@ -365,7 +376,7 @@ export function registerSocketHandlers(io: Server) {
       if (!isValidId(fileId)) return
       if (!isNonNegativeInt(line, LIMITS.CURSOR_POS)) return
       if (!isNonNegativeInt(column, LIMITS.CURSOR_POS)) return
-      if (!currentRoom) return
+      if (!currentRoom || !socket.data.admitted) return
       socket.to(currentRoom).emit('cursor-update', {
         userId: socket.id,
         fileId,
@@ -575,7 +586,7 @@ export function registerSocketHandlers(io: Server) {
 
     safeOn(socket, 'chat-send', ({ content }: { content: string }) => {
       if (!checkRateLimit(socket, 'chat-send')) return
-      if (!currentRoom) return
+      if (!currentRoom || !socket.data.admitted) return
       if (typeof content !== 'string') return
       const trimmed = content.trim().slice(0, 2000)
       if (!trimmed) return
@@ -584,8 +595,9 @@ export function registerSocketHandlers(io: Server) {
     })
 
     safeOn(socket, 'disconnect', () => {
-      pendingKnocks.delete(socket.id)
-      if (!currentRoom) return
+      const ownKnock = pendingKnocks.get(socket.id)
+      if (ownKnock) { clearTimeout(ownKnock.timeoutId); pendingKnocks.delete(socket.id) }
+      if (!currentRoom || !socket.data.admitted) return
       if (currentUserId) untrackUserSocket(currentRoom, currentUserId, socket)
       const wasOwner = getRole(socket) === 'owner'
       removeParticipant(currentRoom, socket.id)
@@ -593,6 +605,7 @@ export function registerSocketHandlers(io: Server) {
       if (wasOwner && !hasOnlineOwner(currentRoom)) {
         for (const [knockId, knock] of pendingKnocks.entries()) {
           if (knock.roomId === currentRoom) {
+            clearTimeout(knock.timeoutId)
             io.sockets.sockets.get(knockId)?.emit('knock-denied')
             pendingKnocks.delete(knockId)
           }
