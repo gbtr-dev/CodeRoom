@@ -45,5 +45,11 @@ export function csrfOriginCheck(allowedOrigin: string) {
       return
     }
 
+    // Nessun Origin né Referer: richiesta mutante senza intestazioni di provenienza — blocca
+    log.warn('Richiesta mutante bloccata — Origin e Referer assenti', {
+      method: req.method,
+      path: req.url,
+    })
+    return reply.status(403).send({ error: 'Cross-origin request blocked' })
   }
 }

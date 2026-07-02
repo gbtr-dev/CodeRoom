@@ -11,7 +11,6 @@ type InviteInfo = {
   roomId: string
   roomName: string | null
   expiresAt: number
-  hasPassword: boolean
 }
 
 function timeLeft(expiresAt: number): string {
@@ -33,6 +32,7 @@ export default function InvitePage() {
   const [error, setError] = useState<string | null>(null)
   const [password, setPassword] = useState("")
   const [wrongPassword, setWrongPassword] = useState(false)
+  const [requiresPassword, setRequiresPassword] = useState(false)
 
   useEffect(() => {
     fetch(`${BACKEND_URL}/invite/${token}`, { credentials: "include" })
@@ -49,7 +49,7 @@ export default function InvitePage() {
       router.push(`/login?redirect=/invite/${token}`)
       return
     }
-    if (info?.hasPassword && !password) return
+    if (requiresPassword && !password) return
     setJoining(true)
     setError(null)
     setWrongPassword(false)
@@ -58,10 +58,11 @@ export default function InvitePage() {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(info?.hasPassword ? { password } : {}),
+        body: JSON.stringify(password ? { password } : {}),
       })
       const data = await res.json()
       if (!res.ok) {
+        if (data.requiresPassword) { setRequiresPassword(true); return }
         if (data.wrongPassword) { setWrongPassword(true); setPassword(""); return }
         setError(data.error ?? "Failed to join room")
         return
@@ -126,7 +127,7 @@ export default function InvitePage() {
           </p>
         )}
 
-        {user && info!.hasPassword && (
+        {user && requiresPassword && (
           <div className="mt-4 flex flex-col gap-1.5">
             <div className="flex items-center gap-2 text-[11px] text-[#555]">
               <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -150,7 +151,7 @@ export default function InvitePage() {
 
         <button
           onClick={join}
-          disabled={joining || (!!user && !!info!.hasPassword && !password)}
+          disabled={joining || (!!user && requiresPassword && !password)}
           className="mt-5 flex h-10 w-full items-center justify-center rounded-xl bg-[#22c55e] font-sans text-[13px] font-semibold text-[#0a0a0a] transition-colors hover:bg-[#26d066] disabled:opacity-50"
         >
           {joining ? "Joining…" : user ? "Join room" : "Log in to join"}

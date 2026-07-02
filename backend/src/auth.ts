@@ -70,6 +70,9 @@ export function createSession(userId: string): { token: string; expiresAt: numbe
 
 /** Verifica un token di sessione contro il DB. Ritorna null se assente, scaduto o invalido. */
 export function verifySessionToken(token: string): { userId: string } | null {
+  // Token = 32 random bytes in hex = exactly 64 lowercase hex chars
+  if (token.length !== 64 || !/^[0-9a-f]+$/.test(token)) return null
+
   const session = dbGetSession(token)
   if (!session) return null
 
@@ -212,7 +215,6 @@ export async function registerAuthRoutes(app: FastifyInstance) {
       roomId: invite.room_id,
       roomName: invite.room_name ?? null,
       expiresAt: invite.expires_at,
-      hasPassword: !!invite.password_hash,
     })
   })
 

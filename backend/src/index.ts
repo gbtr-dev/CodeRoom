@@ -16,7 +16,14 @@ import { initContainerPool } from './executor'
 const log = createLogger('SERVER')
 const app = Fastify({ logger: false })
 
-const CORS_ORIGIN = process.env.CORS_ORIGIN || 'http://localhost:3000'
+const NODE_ENV = process.env.NODE_ENV ?? 'development'
+
+if (NODE_ENV === 'production' && !process.env.CORS_ORIGIN) {
+  console.error('[SERVER] CORS_ORIGIN non impostata in produzione — avvio bloccato')
+  process.exit(1)
+}
+
+const CORS_ORIGIN = process.env.CORS_ORIGIN ?? 'http://localhost:3000'
 
 app.register(cors, {
   origin: CORS_ORIGIN,

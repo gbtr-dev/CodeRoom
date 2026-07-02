@@ -1,6 +1,5 @@
 import { randomUUID } from 'crypto'
 import {
-  dbGetOrCreateRoom,
   dbGetFiles,
   dbCreateFile,
   dbUpdateFileContent,
@@ -116,7 +115,6 @@ export function flushAllRoomContent() {
 }
 
 export function getOrCreateRoom(roomId: string): Room {
-  dbGetOrCreateRoom(roomId)
   if (!rooms.has(roomId)) {
     rooms.set(roomId, {
       id: roomId,
