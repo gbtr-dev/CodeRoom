@@ -503,6 +503,11 @@ export function dbCreateRoom(roomId: string, userId?: string, name?: string) {
   stmtInsertRoom.run(roomId, userId ?? null, name?.trim().slice(0, 60) || null)
 }
 
+export const dbCreateRoomWithOwner = db.transaction((roomId: string, userId: string, name?: string) => {
+  stmtInsertRoom.run(roomId, userId, name?.trim().slice(0, 60) || null)
+  stmtUpsertRoomMember.run(userId, roomId, 'owner')
+})
+
 /* ------------------------------------------------------------------ */
 /* Role management queries                                            */
 /* ------------------------------------------------------------------ */

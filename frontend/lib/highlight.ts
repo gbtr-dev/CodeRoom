@@ -569,12 +569,7 @@ function sameState(a: HlState | undefined, b: HlState): boolean {
   return !!a && a.inBlock === b.inBlock && a.blockEnd === b.blockEnd
 }
 
-// Riusa l'highlight delle righe non toccate da una modifica invece di
-// ritokenizzare l'intero file ad ogni keystroke. Una riga viene ricalcolata
-// solo se il suo testo è cambiato oppure se lo stato (es. commento multilinea)
-// con cui la riga viene "raggiunta" è diverso da quello dell'ultima esecuzione:
-// in entrambi i casi il risultato resta identico a una ricostruzione completa,
-// solo più rapido perché evita lavoro su righe identiche e invariate.
+
 export function highlightCode(code: string, lang: Lang, cache?: HighlightCache): { html: string; cache: HighlightCache } {
   const lines = code.split("\n")
   const prev = cache && cache.lang === lang ? cache : undefined

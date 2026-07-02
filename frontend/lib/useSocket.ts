@@ -116,6 +116,10 @@ export function useSocket(
       setKnockStatus("denied")
     })
 
+    socket.on("login-required", () => {
+      router.replace(`/login?redirect=${encodeURIComponent(`/room/${roomId}`)}`)
+    })
+
     socket.on("room-password-required", () => {
       setKnockStatus("password-required")
     })
@@ -393,6 +397,7 @@ export function useSocket(
       socket.off("files-imported")
       socket.off("rate-limited")
       socket.off("chat-message")
+      socket.off("login-required")
       socket.off("room-password-required")
       socket.off("room-wrong-password")
       socket.disconnect()

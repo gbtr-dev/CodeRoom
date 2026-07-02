@@ -13,7 +13,7 @@ import {
   hasOnlineOwner,
 } from './rooms'
 import { executeCode, formatCode } from './executor'
-import { dbRoomExists, dbAddRoomMember, dbCreateRoom, dbGetUserById, dbSetRoomName, dbGetRoom, dbGetMemberRole, dbSetMemberRole, dbGetRoomMembers, dbRemoveMember, dbRenameFile, dbMoveFile, dbSaveChatMessage, dbGetChatMessages, type RoomRole } from './db'
+import { dbRoomExists, dbAddRoomMember, dbCreateRoom, dbCreateRoomWithOwner, dbGetUserById, dbSetRoomName, dbGetRoom, dbGetMemberRole, dbSetMemberRole, dbGetRoomMembers, dbRemoveMember, dbRenameFile, dbMoveFile, dbSaveChatMessage, dbGetChatMessages, type RoomRole } from './db'
 import { verifySessionToken, SESSION_COOKIE_NAME } from './auth'
 import bcrypt from 'bcryptjs'
 import { createLogger } from './logger'
@@ -190,13 +190,12 @@ export function registerSocketHandlers(io: Server) {
           socket.emit('error', { message: 'Login required to create a room' })
           return
         }
-        // Creator: create room and admit directly as owner
-        dbCreateRoom(roomId, currentUserId, isString(roomName) ? roomName : undefined)
+        // Creator: create room and add owner atomically (prevents race on concurrent join)
+        dbCreateRoomWithOwner(roomId, currentUserId, isString(roomName) ? roomName : undefined)
         socket.join(roomId)
 
         let role: RoomRole = 'viewer'
         if (currentUserId) {
-          dbAddRoomMember(currentUserId, roomId, 'owner')
           role = 'owner'
           setRole(socket, role)
           trackUserSocket(roomId, currentUserId, socket)
@@ -248,6 +247,11 @@ export function registerSocketHandlers(io: Server) {
 
       // Unknown visitor — check if room is password-protected
       if (roomRow?.password_hash) {
+        // Anonymous users cannot enter password-protected rooms: require authentication
+        if (!currentUserId) {
+          socket.emit('login-required')
+          return
+        }
         if (!password) {
           socket.emit('room-password-required')
           return
@@ -257,7 +261,7 @@ export function registerSocketHandlers(io: Server) {
           socket.emit('room-wrong-password')
           return
         }
-        // Correct password — admit directly as viewer
+        // Correct password — admit authenticated user as viewer
         log.info(`[ROOM] Password correct — user = ${currentUser} | room = ${roomId}`)
         admitUser(roomId, socket, currentUserId, currentUser, currentUserEmail, currentAvatar)
         return
