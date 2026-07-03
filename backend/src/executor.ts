@@ -132,13 +132,22 @@ export async function shutdownPool(): Promise<void> {
   }
 }
 
+const filling = new Set<string>()
+
 async function fillPool(language: string) {
-  const current = pool.get(language) ?? []
-  const needed = POOL_SIZE - current.length
-  if (needed <= 0) return
-  const ids = await Promise.all(Array.from({ length: needed }, () => spawnWarmContainer(language)))
-  const valid = ids.filter((id): id is string => id !== null)
-  pool.set(language, [...current, ...valid])
+  if (filling.has(language)) return
+  filling.add(language)
+  try {
+    const current = pool.get(language) ?? []
+    const needed = POOL_SIZE - current.length
+    if (needed <= 0) return
+    const ids = await Promise.all(Array.from({ length: needed }, () => spawnWarmContainer(language)))
+    const valid = ids.filter((id): id is string => id !== null)
+    const nowCurrent = pool.get(language) ?? []
+    pool.set(language, [...nowCurrent, ...valid])
+  } finally {
+    filling.delete(language)
+  }
 }
 
 function killContainer(id: string) {

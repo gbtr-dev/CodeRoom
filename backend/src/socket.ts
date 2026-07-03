@@ -93,7 +93,7 @@ export function registerSocketHandlers(io: Server) {
     let currentUserId: string | null = null
     let currentAvatar: string | null = null
 
-    function admitUser(roomId: string, admittedSocket: Socket, admittedUserId: string | null, admittedName: string, admittedEmail: string, admittedAvatar?: string | null) {
+    function admitUser(roomId: string, admittedSocket: Socket, admittedUserId: string | null, admittedName: string, admittedEmail: string, admittedAvatar?: string | null, preloadedRow?: ReturnType<typeof dbGetRoom>) {
       admittedSocket.join(roomId)
       admittedSocket.data.admitted = true
 
@@ -112,7 +112,7 @@ export function registerSocketHandlers(io: Server) {
 
       const participant = addParticipant(roomId, admittedSocket.id, admittedName, admittedUserId ?? undefined, role, admittedAvatar)
       const room = getOrCreateRoom(roomId)
-      const roomRow = dbGetRoom(roomId)
+      const roomRow = preloadedRow ?? dbGetRoom(roomId)
 
       const otherParticipants = Array.from(room.participants.entries())
         .filter(([id]) => id !== admittedSocket.id)
@@ -227,7 +227,7 @@ export function registerSocketHandlers(io: Server) {
         if (existingRole) {
           if (existingRole === 'owner') {
             // Owner always gets in — they set the password
-            admitUser(roomId, socket, currentUserId, currentUser, currentUserEmail, currentAvatar)
+            admitUser(roomId, socket, currentUserId, currentUser, currentUserEmail, currentAvatar, roomRow)
             return
           }
           // Editor / viewer: must enter password if room is locked
@@ -242,7 +242,7 @@ export function registerSocketHandlers(io: Server) {
               return
             }
           }
-          admitUser(roomId, socket, currentUserId, currentUser, currentUserEmail, currentAvatar)
+          admitUser(roomId, socket, currentUserId, currentUser, currentUserEmail, currentAvatar, roomRow)
           return
         }
       }
@@ -265,7 +265,7 @@ export function registerSocketHandlers(io: Server) {
         }
         // Correct password — admit authenticated user as viewer
         log.info(`[ROOM] Password correct — user = ${currentUser} | room = ${roomId}`)
-        admitUser(roomId, socket, currentUserId, currentUser, currentUserEmail, currentAvatar)
+        admitUser(roomId, socket, currentUserId, currentUser, currentUserEmail, currentAvatar, roomRow)
         return
       }
 
