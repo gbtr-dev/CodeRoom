@@ -6,6 +6,7 @@ type ExecResult = { output: string; error: string; exitCode: number; duration: n
 type LangConfig = {
   image: string
   filename: string
+  runCmd: (f: string) => string
   extraEnv?: string[]
   timeoutMs?: number
 }
@@ -15,53 +16,34 @@ const COMPILE_TIMEOUT = 60_000
 const MAX_OUTPUT      = 100_000
 
 const LANG_CONFIGS: Record<string, LangConfig> = {
-  js:     { image: 'node:22-alpine',       filename: 'index.js'   },
-  jsx:    { image: 'node:22-alpine',       filename: 'index.jsx'  },
-  ts:     { image: 'node:22-alpine',       filename: 'index.ts'   },
-  tsx:    { image: 'node:22-alpine',       filename: 'index.tsx'  },
-  py:     { image: 'python:3.12-alpine',   filename: 'main.py'    },
-  go:     { image: 'golang:1.23-alpine',   filename: 'main.go',   extraEnv: ['GOPATH=/tmp/go', 'GOCACHE=/tmp/cache', 'HOME=/tmp'], timeoutMs: COMPILE_TIMEOUT },
-  java:   { image: 'openjdk:21-slim',      filename: 'Main.java', timeoutMs: COMPILE_TIMEOUT },
-  kotlin: { image: 'zenika/kotlin:latest', filename: 'Main.kt',   timeoutMs: COMPILE_TIMEOUT },
-  c:      { image: 'gcc:latest',           filename: 'main.c',    timeoutMs: COMPILE_TIMEOUT },
-  cpp:    { image: 'gcc:latest',           filename: 'main.cpp',  timeoutMs: COMPILE_TIMEOUT },
-  rust:   { image: 'rust:alpine',          filename: 'main.rs',   extraEnv: ['CARGO_HOME=/tmp/cargo'], timeoutMs: COMPILE_TIMEOUT },
-  csharp: { image: 'mono:latest',          filename: 'Program.cs',timeoutMs: COMPILE_TIMEOUT },
-  swift:  { image: 'swift:slim',           filename: 'main.swift',extraEnv: ['HOME=/tmp'], timeoutMs: COMPILE_TIMEOUT },
-  ruby:   { image: 'ruby:3.3-alpine',      filename: 'main.rb'    },
-  php:    { image: 'php:8.3-cli-alpine',   filename: 'main.php'   },
-  perl:   { image: 'perl:slim',            filename: 'main.pl'    },
-  lua:    { image: 'nickblah/lua:5.4',     filename: 'main.lua'   },
-  r:      { image: 'r-base:latest',        filename: 'main.R'     },
-  shell:  { image: 'alpine:3.20',          filename: 'script.sh'  },
+  js:     { image: 'node:22-alpine',       filename: 'index.js',   runCmd: f => `node ${f}` },
+  jsx:    { image: 'node:22-alpine',       filename: 'index.jsx',  runCmd: f => `node ${f}` },
+  ts:     { image: 'node:22-alpine',       filename: 'index.ts',   runCmd: f => `node --experimental-strip-types ${f}` },
+  tsx:    { image: 'node:22-alpine',       filename: 'index.tsx',  runCmd: f => `node --experimental-strip-types ${f}` },
+  py:     { image: 'python:3.12-alpine',   filename: 'main.py',    runCmd: f => `python ${f}` },
+  go:     { image: 'golang:1.23-alpine',   filename: 'main.go',    runCmd: _ => `cd /tmp && go run main.go`,   extraEnv: ['GOPATH=/tmp/go', 'GOCACHE=/tmp/cache', 'HOME=/tmp'], timeoutMs: COMPILE_TIMEOUT },
+  java:   { image: 'openjdk:21-slim',      filename: 'Main.java',  runCmd: f => `java ${f}`,                   timeoutMs: COMPILE_TIMEOUT },
+  kotlin: { image: 'zenika/kotlin:latest', filename: 'Main.kt',    runCmd: f => `kotlinc ${f} -include-runtime -d /tmp/main.jar 2>/dev/null && java -jar /tmp/main.jar`, timeoutMs: COMPILE_TIMEOUT },
+  c:      { image: 'gcc:latest',           filename: 'main.c',     runCmd: f => `gcc -o /tmp/out ${f} && /tmp/out`,   timeoutMs: COMPILE_TIMEOUT },
+  cpp:    { image: 'gcc:latest',           filename: 'main.cpp',   runCmd: f => `g++ -o /tmp/out ${f} && /tmp/out`,   timeoutMs: COMPILE_TIMEOUT },
+  rust:   { image: 'rust:alpine',          filename: 'main.rs',    runCmd: f => `rustc -o /tmp/out ${f} && /tmp/out`, extraEnv: ['CARGO_HOME=/tmp/cargo'], timeoutMs: COMPILE_TIMEOUT },
+  csharp: { image: 'mono:latest',          filename: 'Program.cs', runCmd: f => `mcs -out:/tmp/prog.exe ${f} && mono /tmp/prog.exe`, timeoutMs: COMPILE_TIMEOUT },
+  swift:  { image: 'swift:slim',           filename: 'main.swift', runCmd: f => `swift ${f}`,   extraEnv: ['HOME=/tmp'], timeoutMs: COMPILE_TIMEOUT },
+  ruby:   { image: 'ruby:3.3-alpine',      filename: 'main.rb',    runCmd: f => `ruby ${f}` },
+  php:    { image: 'php:8.3-cli-alpine',   filename: 'main.php',   runCmd: f => `php ${f}` },
+  perl:   { image: 'perl:slim',            filename: 'main.pl',    runCmd: f => `perl ${f}` },
+  lua:    { image: 'nickblah/lua:5.4',     filename: 'main.lua',   runCmd: f => `lua ${f}` },
+  r:      { image: 'r-base:latest',        filename: 'main.R',     runCmd: f => `Rscript ${f}` },
+  shell:  { image: 'alpine:3.20',          filename: 'script.sh',  runCmd: f => `sh ${f}` },
 }
 
 // Code is embedded as base64 in the shell command so stdin remains free
 // for user input. `printf %s` avoids the trailing newline that `echo` adds,
 // which matters for binary-safe decoding.
-function buildShCmd(filename: string, codeBase64: string): string {
-  const f = `/tmp/${filename}`
+function buildShCmd(config: LangConfig, codeBase64: string): string {
+  const f = `/tmp/${config.filename}`
   const decode = `printf '%s' '${codeBase64}' | base64 -d > ${f}`
-  if (filename === 'index.js')   return `${decode} && node ${f}`
-  if (filename === 'index.jsx')  return `${decode} && node ${f}`
-  if (filename === 'index.ts')   return `${decode} && node --experimental-strip-types ${f}`
-  if (filename === 'index.tsx')  return `${decode} && node --experimental-strip-types ${f}`
-  if (filename === 'main.py')    return `${decode} && python ${f}`
-  if (filename === 'main.go')    return `${decode} && cd /tmp && go run main.go`
-  if (filename === 'Main.java')  return `${decode} && java ${f}`
-  if (filename === 'Main.kt')    return `${decode} && kotlinc ${f} -include-runtime -d /tmp/main.jar 2>/dev/null && java -jar /tmp/main.jar`
-  if (filename === 'main.c')     return `${decode} && gcc -o /tmp/out ${f} && /tmp/out`
-  if (filename === 'main.cpp')   return `${decode} && g++ -o /tmp/out ${f} && /tmp/out`
-  if (filename === 'main.rs')    return `${decode} && rustc -o /tmp/out ${f} && /tmp/out`
-  if (filename === 'Program.cs') return `${decode} && mcs -out:/tmp/prog.exe ${f} && mono /tmp/prog.exe`
-  if (filename === 'main.swift') return `${decode} && swift ${f}`
-  if (filename === 'main.rb')    return `${decode} && ruby ${f}`
-  if (filename === 'main.php')   return `${decode} && php ${f}`
-  if (filename === 'main.pl')    return `${decode} && perl ${f}`
-  if (filename === 'main.lua')   return `${decode} && lua ${f}`
-  if (filename === 'main.R')     return `${decode} && Rscript ${f}`
-  if (filename === 'script.sh')  return `${decode} && sh ${f}`
-  return `${decode} && ${f}`
+  return `${decode} && ${config.runCmd(f)}`
 }
 
 // ── Warm container pool ───────────────────────────────────────────────────────
@@ -178,7 +160,7 @@ export async function executeCode(language: string, code: string, stdin?: string
   }
 
   const codeBase64 = Buffer.from(code).toString('base64')
-  const shCmd = buildShCmd(config.filename, codeBase64)
+  const shCmd = buildShCmd(config, codeBase64)
   const timeoutMs = config.timeoutMs ?? INTERP_TIMEOUT
   const stdinPayload = stdin ?? ''
 

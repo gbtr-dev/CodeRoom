@@ -53,10 +53,10 @@ function getLangFromName(name: string): string {
   return map[ext] ?? 'plaintext'
 }
 
-function ensureCacheLoaded(room: Room) {
+function ensureCacheLoaded(room: Room, rows?: ReturnType<typeof dbGetFiles>) {
   if (room.cacheLoaded) return
-  const rows = dbGetFiles(room.id)
-  for (const row of rows) {
+  const data = rows ?? dbGetFiles(room.id)
+  for (const row of data) {
     if (row.kind === 'file') {
       room.fileContent.set(row.id, row.content ?? '')
       fileRoomIndex.set(row.id, room.id)
@@ -129,13 +129,7 @@ export function getOrCreateRoom(roomId: string): Room {
 export function getRoomFiles(roomId: string): FileNode[] {
   const room = getOrCreateRoom(roomId)
   const rows = dbGetFiles(roomId)
-  for (const row of rows) {
-    if (!room.cacheLoaded && row.kind === 'file') {
-      room.fileContent.set(row.id, row.content ?? '')
-      fileRoomIndex.set(row.id, roomId)
-    }
-  }
-  room.cacheLoaded = true
+  ensureCacheLoaded(room, rows)
 
   const validIds = new Set(rows.map(r => r.id))
   return rows.map((row) => {
