@@ -14,10 +14,12 @@ export function safeOn(
       if (result instanceof Promise) {
         result.catch((err) => {
           log.error(`Eccezione non gestita (async) in "${event}"`, { socketId: socket.id, error: String(err) })
+          socket.emit('server-error', { event })
         }).catch(() => {})
       }
     } catch (err) {
       log.error(`Eccezione non gestita in "${event}"`, { socketId: socket.id, error: String(err) })
+      socket.emit('server-error', { event })
     }
   })
 }
