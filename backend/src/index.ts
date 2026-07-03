@@ -10,7 +10,7 @@ import { csrfOriginCheck } from './csrf'
 import { flushAllRoomContent } from './rooms'
 import { dbDeleteExpiredSessions, dbDeleteExpiredLoginAttempts, dbDeleteExpiredInvites } from './db'
 import { createLogger } from './logger'
-import { initContainerPool } from './executor'
+import { initContainerPool, shutdownPool } from './executor'
 
 
 const log = createLogger('SERVER')
@@ -91,6 +91,7 @@ async function shutdown(signal: string) {
 
   log.info('Flush contenuti su DB…')
   flushAllRoomContent()
+  await shutdownPool()
   log.info('Flush completato, uscita.')
 
   clearTimeout(timer)

@@ -537,6 +537,7 @@ export async function registerAuthRoutes(app: FastifyInstance) {
       const existingRole = dbGetMemberRole(req.userId, invite.room_id)
       if (!existingRole) {
         dbAddRoomMember(req.userId, invite.room_id, 'viewer')
+        dbDeleteInvite(token)
         log.info('User joined via invite', { userId: req.userId, roomId: invite.room_id })
       }
 

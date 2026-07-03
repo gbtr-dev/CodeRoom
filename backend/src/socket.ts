@@ -309,7 +309,7 @@ export function registerSocketHandlers(io: Server) {
       if (getRole(socket) !== 'owner') return
 
       const knock = pendingKnocks.get(knockId)
-      if (!knock) return
+      if (!knock || knock.roomId !== currentRoom) return
       clearTimeout(knock.timeoutId)
       pendingKnocks.delete(knockId)
 
@@ -344,7 +344,7 @@ export function registerSocketHandlers(io: Server) {
       if (!checkRateLimit(socket, 'code-change')) return
       if (!isValidId(fileId)) return
       if (!isBoundedString(content, LIMITS.FILE_CONTENT)) return
-      if (!currentRoom) return
+      if (!currentRoom || !socket.data.admitted) return
       if (getRole(socket) === 'viewer') return
       if (!updateFileContent(currentRoom, fileId, content)) {
         log.warn(`[ROOM] code-change su file non appartenente alla room — file = ${fileId} | user = ${currentUser} | room = ${currentRoom}`)
@@ -360,7 +360,7 @@ export function registerSocketHandlers(io: Server) {
       if (!isNonNegativeInt(start, LIMITS.FILE_CONTENT)) return
       if (!isNonNegativeInt(deleteCount, LIMITS.FILE_CONTENT)) return
       if (!isBoundedString(insert, LIMITS.PATCH_INSERT)) return
-      if (!currentRoom) return
+      if (!currentRoom || !socket.data.admitted) return
       if (getRole(socket) === 'viewer') return
 
       const updated = applyFilePatch(currentRoom, fileId, start, deleteCount, insert)
@@ -392,7 +392,7 @@ export function registerSocketHandlers(io: Server) {
       if (!isValidFileName(name)) { reject(); return }
       if (!isFileKind(type)) { reject(); return }
       if (content !== undefined && !isBoundedString(content, LIMITS.FILE_CONTENT)) { reject(); return }
-      if (!currentRoom) return
+      if (!currentRoom || !socket.data.admitted) return
       if (getRole(socket) === 'viewer') return
       const node = createFile(currentRoom, parentId, name, type, content)
       log.info(`[ROOM] File created — file = ${name} | user = ${currentUser} |  email = ${currentUserEmail} | room = ${currentRoom}`)
@@ -408,7 +408,7 @@ export function registerSocketHandlers(io: Server) {
       const reject = () => { if (typeof callback === 'function') callback({ __rejected: '1' }) }
       if (!checkRateLimit(socket, 'import-zip')) { reject(); return }
       if (!Array.isArray(entries) || entries.length === 0 || entries.length > LIMITS.IMPORT_ENTRIES) { reject(); return }
-      if (!currentRoom) return
+      if (!currentRoom || !socket.data.admitted) return
       if (getRole(socket) === 'viewer') return
       const idMap: Record<string, string> = {}
       const createdNodes: ReturnType<typeof createFile>[] = []
@@ -443,7 +443,7 @@ export function registerSocketHandlers(io: Server) {
     safeOn(socket, 'rename-room', ({ name }: { name: string }) => {
       if (!checkRateLimit(socket, 'rename-room')) return
       if (!isString(name)) return
-      if (!currentRoom) return
+      if (!currentRoom || !socket.data.admitted) return
       if (getRole(socket) !== 'owner') return
       const savedName = dbSetRoomName(currentRoom, name.slice(0, LIMITS.ROOM_NAME))
       io.to(currentRoom).emit('room-renamed', { name: savedName })
@@ -453,7 +453,7 @@ export function registerSocketHandlers(io: Server) {
     safeOn(socket, 'delete-file', ({ fileId }: { fileId: string }) => {
       if (!checkRateLimit(socket, 'delete-file')) return
       if (!isValidId(fileId)) return
-      if (!currentRoom) return
+      if (!currentRoom || !socket.data.admitted) return
       if (getRole(socket) === 'viewer') return
       if (!deleteFile(currentRoom, fileId)) {
         log.warn(`[ROOM] delete-file su file non appartenente alla room — file = ${fileId} | user = ${currentUser} | room = ${currentRoom}`)
@@ -468,7 +468,7 @@ export function registerSocketHandlers(io: Server) {
       if (!isString(language)) return
       if (!isBoundedString(code, LIMITS.RUN_CODE)) return
       if (stdin !== undefined && !isBoundedString(stdin, 10_000)) return
-      if (!currentRoom) return
+      if (!currentRoom || !socket.data.admitted) return
       if (getRole(socket) === 'viewer') return
 
       socket.emit('run-started', { language })
@@ -486,7 +486,7 @@ export function registerSocketHandlers(io: Server) {
       if (!checkRateLimit(socket, 'format-code')) return
       if (!isString(language)) return
       if (!isBoundedString(code, LIMITS.RUN_CODE)) return
-      if (!currentRoom) return
+      if (!currentRoom || !socket.data.admitted) return
       if (getRole(socket) === 'viewer') return
 
       const result = await formatCode(language, code)
@@ -497,7 +497,7 @@ export function registerSocketHandlers(io: Server) {
     safeOn(socket, 'set-member-role', ({ userId, role }: { userId: string; role: RoomRole }) => {
       if (!checkRateLimit(socket, 'set-member-role')) return
       if (!isValidId(userId)) return
-      if (!currentRoom || !currentUserId) return
+      if (!currentRoom || !currentUserId || !socket.data.admitted) return
       if (getRole(socket) !== 'owner') {
         socket.emit('role-error', { message: 'Only the owner can change roles' })
         return
@@ -531,7 +531,7 @@ export function registerSocketHandlers(io: Server) {
     safeOn(socket, 'kick-member', ({ userId }: { userId: string }) => {
       if (!checkRateLimit(socket, 'kick-member')) return
       if (!isValidId(userId)) return
-      if (!currentRoom || !currentUserId) return
+      if (!currentRoom || !currentUserId || !socket.data.admitted) return
       if (getRole(socket) !== 'owner') {
         socket.emit('role-error', { message: 'Only the owner can kick members' })
         return
@@ -558,7 +558,7 @@ export function registerSocketHandlers(io: Server) {
       if (!checkRateLimit(socket, 'rename-file')) return
       if (!isValidId(fileId)) return
       if (!isValidFileName(name)) return
-      if (!currentRoom) return
+      if (!currentRoom || !socket.data.admitted) return
       if (getRole(socket) === 'viewer') return
       const trimmed = name.trim().slice(0, LIMITS.FILE_NAME)
       if (!trimmed) return
@@ -574,7 +574,7 @@ export function registerSocketHandlers(io: Server) {
       if (!checkRateLimit(socket, 'move-file')) return
       if (!isValidId(fileId)) return
       if (!isValidId(parentId)) return
-      if (!currentRoom) return
+      if (!currentRoom || !socket.data.admitted) return
       if (getRole(socket) === 'viewer') return
       if (!dbMoveFile(fileId, currentRoom, parentId)) {
         log.warn(`[ROOM] move-file su file/parent non appartenente alla room — file = ${fileId} | parent = ${parentId} | user = ${currentUser} | room = ${currentRoom}`)

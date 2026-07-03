@@ -85,6 +85,8 @@ function dockerCmd(args: string[]): Promise<string> {
   })
 }
 
+const POOL_LABEL = 'coderoom.role=pool'
+
 async function spawnWarmContainer(language: string): Promise<string | null> {
   const config = LANG_CONFIGS[language]
   if (!config) return null
@@ -93,6 +95,7 @@ async function spawnWarmContainer(language: string): Promise<string | null> {
   try {
     const id = await dockerCmd([
       'run', '-d', '--rm',
+      '--label',       POOL_LABEL,
       '--network',     'none',
       '--memory',      '256m',
       '--memory-swap', '256m',
@@ -107,6 +110,25 @@ async function spawnWarmContainer(language: string): Promise<string | null> {
     return id
   } catch {
     return null
+  }
+}
+
+async function killStalePoolContainers(): Promise<void> {
+  try {
+    const ids = await dockerCmd(['ps', '-q', '--filter', `label=${POOL_LABEL}`])
+    if (!ids) return
+    const list = ids.split('\n').filter(Boolean)
+    if (list.length > 0) await dockerCmd(['kill', ...list]).catch(() => {})
+  } catch {
+    // Non fatale
+  }
+}
+
+export async function shutdownPool(): Promise<void> {
+  const allIds = Array.from(pool.values()).flat()
+  pool.clear()
+  if (allIds.length > 0) {
+    await dockerCmd(['kill', ...allIds]).catch(() => {})
   }
 }
 
@@ -132,6 +154,7 @@ async function acquireContainer(language: string): Promise<string | null> {
 }
 
 export async function initContainerPool() {
+  await killStalePoolContainers()
   await Promise.all(WARM_LANGUAGES.map(lang => fillPool(lang)))
 }
 
