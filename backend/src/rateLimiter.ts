@@ -44,6 +44,8 @@ const RATE_LIMITS: Record<string, RateLimitConfig> = {
   'join-room':        { capacity: 5,  refillPerSec: 0.5 },
   'approve-knock':    { capacity: 20, refillPerSec: 2 },
   'deny-knock':       { capacity: 20, refillPerSec: 2 },
+  'chat-send':        { capacity: 10, refillPerSec: 1 },
+  'format-code':      { capacity: 3,  refillPerSec: 0.2 },
 }
 
 const ABUSE_BUDGET: RateLimitConfig = { capacity: 60, refillPerSec: 1 }

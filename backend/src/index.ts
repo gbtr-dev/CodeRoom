@@ -2,6 +2,7 @@ import 'dotenv/config'
 import Fastify from 'fastify'
 import cors from '@fastify/cors'
 import cookie from '@fastify/cookie'
+import helmet from '@fastify/helmet'
 import rateLimit from '@fastify/rate-limit'
 import { Server } from 'socket.io'
 import { registerSocketHandlers } from './socket'
@@ -35,6 +36,9 @@ app.register(cors, {
 
 app.register(cookie)
 
+// Sicurezza HTTP: X-Frame-Options, X-Content-Type-Options, HSTS, ecc.
+// CSP disabilitato perché questo server espone solo API JSON, non pagine HTML.
+app.register(helmet, { contentSecurityPolicy: false })
 
 app.addHook('preHandler', csrfOriginCheck(CORS_ORIGIN))
 
