@@ -143,6 +143,9 @@ export async function registerAuthRoutes(app: FastifyInstance) {
     if (password.length < 6) {
       return reply.status(400).send({ error: 'Password must be at least 6 characters' })
     }
+    if (password.length > 72) {
+      return reply.status(400).send({ error: 'Password must be 72 characters or less' })
+    }
 
     const normalizedEmail = email.toLowerCase().trim()
     const existing = dbGetUserByEmail(normalizedEmail)
@@ -426,6 +429,7 @@ export async function registerAuthRoutes(app: FastifyInstance) {
       const { currentPassword, newPassword } = req.body as { currentPassword: string; newPassword: string }
       if (!currentPassword || !newPassword) return reply.status(400).send({ error: 'Both passwords are required' })
       if (newPassword.length < 6) return reply.status(400).send({ error: 'Password must be at least 6 characters' })
+      if (newPassword.length > 72) return reply.status(400).send({ error: 'Password must be 72 characters or less' })
 
       const user = dbGetUserById(req.userId)
       if (!user) return reply.status(404).send({ error: 'User not found' })

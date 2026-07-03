@@ -43,7 +43,7 @@ app.register(helmet, { contentSecurityPolicy: false })
 app.addHook('preHandler', csrfOriginCheck(CORS_ORIGIN))
 
 app.register(rateLimit, {
-  global: false,
+  global: true,
   max: 1000,
   timeWindow: '1 minute',
 })
