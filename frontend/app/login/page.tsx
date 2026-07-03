@@ -257,7 +257,9 @@ function LoginInner() {
   const params = useSearchParams()
   const { login, signup } = useAuth()
 
-  const redirect = params.get("redirect") || "/"
+  const rawRedirect = params.get("redirect") ?? "/"
+  // Allow only relative internal paths — block open redirect to external URLs
+  const redirect = rawRedirect.startsWith("/") && !rawRedirect.startsWith("//") ? rawRedirect : "/"
   const [mode, setMode] = useState<"login" | "signup">("login")
   const [name, setName] = useState("")
   const [email, setEmail] = useState("")

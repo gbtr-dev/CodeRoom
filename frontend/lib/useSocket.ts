@@ -242,15 +242,24 @@ export function useSocket(
 
     socket.on("code-patch", ({ fileId, start, deleteCount, insert }: TextPatch & { fileId: string }) => {
       const apply = (text: string) => applyTextPatch(text, { start, deleteCount, insert })
+      // Patch lastSyncedContent synchronously so it stays ahead of React state.
+      // This avoids the race where setNodes from a prior code-update hasn't run yet
+      // and n.content is stale when the patch callback executes.
+      const synced = cb.current.lastSyncedContent.current[fileId]
+      if (synced !== undefined) cb.current.lastSyncedContent.current[fileId] = apply(synced)
       cb.current.setNodes((prev) => {
-        const next = prev.map((n) => (n.id === fileId ? { ...n, content: apply(n.content ?? "") } : n))
-        const updated = next.find((n) => n.id === fileId)?.content
-        if (updated !== undefined) cb.current.lastSyncedContent.current[fileId] = updated
-        return next
+        return prev.map((n) => {
+          if (n.id !== fileId) return n
+          // Use the already-patched ref as ground truth; fall back to patching n.content
+          // only when the file hasn't been synced yet (e.g. first patch ever).
+          const content = cb.current.lastSyncedContent.current[fileId] ?? apply(n.content ?? "")
+          return { ...n, content }
+        })
       })
       cb.current.setActiveContent((cur) => {
         const aid = cb.current.activeIdRef.current
-        return aid === fileId ? apply(cur) : cur
+        if (aid !== fileId) return cur
+        return cb.current.lastSyncedContent.current[fileId] ?? apply(cur)
       })
     })
 
