@@ -83,6 +83,7 @@ export function disconnectAllUserSockets(userId: string) {
 }
 
 const pendingKnocks = new Map<string, { userId: string | null; userName: string; roomId: string; timeoutId: ReturnType<typeof setTimeout> }>()
+const MAX_PENDING_KNOCKS_PER_ROOM = 20
 
 export function registerSocketHandlers(io: Server) {
   ioInstance = io
@@ -270,6 +271,14 @@ export function registerSocketHandlers(io: Server) {
       }
 
       // No password — send knock to all owners currently in the room
+      // Cap pending knocks per room to prevent memory DoS
+      const roomPendingCount = Array.from(pendingKnocks.values()).filter(k => k.roomId === roomId).length
+      if (roomPendingCount >= MAX_PENDING_KNOCKS_PER_ROOM) {
+        socket.emit('knock-denied')
+        log.warn(`[ROOM] Knock denied — too many pending (${roomPendingCount}) | room = ${roomId}`)
+        return
+      }
+
       const knockTimeoutId = setTimeout(() => {
         if (pendingKnocks.has(socket.id)) {
           pendingKnocks.delete(socket.id)

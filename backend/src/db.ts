@@ -452,6 +452,10 @@ export function dbUpdateUserPassword(id: string, passwordHash: string) {
   stmtUpdateUserPassword.run(passwordHash, id)
 }
 
+export function dbGetOwnedRooms(userId: string): string[] {
+  return (stmtSelectOwnedRooms.all(userId) as { room_id: string }[]).map(r => r.room_id)
+}
+
 export function dbDeleteUser(id: string) {
   const tx = db.transaction((userId: string) => {
     

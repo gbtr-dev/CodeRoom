@@ -15,6 +15,7 @@ import {
   dbUpdateUserEmail,
   dbUpdateUserPassword,
   dbDeleteUser,
+  dbGetOwnedRooms,
   dbAddRoomMember,
   dbGetMemberRole,
   dbSetRoomPassword,
@@ -455,7 +456,10 @@ export async function registerAuthRoutes(app: FastifyInstance) {
       const valid = await bcrypt.compare(password, userFull.password_hash)
       if (!valid) return reply.status(401).send({ error: 'Incorrect password' })
 
+      // Notify users in owned rooms before deleting data
+      const ownedRooms = dbGetOwnedRooms(req.userId)
       disconnectAllUserSockets(req.userId)
+      for (const roomId of ownedRooms) notifyRoomDeleted(roomId)
       dbDeleteUser(req.userId)
       reply.clearCookie(SESSION_COOKIE_NAME, { path: '/' })
       log.info('User account deleted', { userId: req.userId })
