@@ -338,7 +338,7 @@ export function registerSocketHandlers(io: Server) {
       if (getRole(socket) !== 'owner') return
 
       const knock = pendingKnocks.get(knockId)
-      if (!knock) return
+      if (!knock || knock.roomId !== currentRoom) return
       clearTimeout(knock.timeoutId)
       pendingKnocks.delete(knockId)
 
