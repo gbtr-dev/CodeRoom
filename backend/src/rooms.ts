@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto'
+import { LIMITS } from './validation'
 import {
   dbGetFiles,
   dbCreateFile,
@@ -193,7 +194,9 @@ export function applyFilePatch(
   ensureCacheLoaded(room)
   if (!room.fileContent.has(fileId)) return null
   const current = room.fileContent.get(fileId) ?? ''
+  if (start > current.length || start + deleteCount > current.length) return null
   const updated = current.slice(0, start) + insert + current.slice(start + deleteCount)
+  if (updated.length > LIMITS.FILE_CONTENT) return null
   updateFileContent(roomId, fileId, updated)
   return updated
 }

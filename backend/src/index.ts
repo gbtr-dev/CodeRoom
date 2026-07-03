@@ -15,7 +15,7 @@ import { initContainerPool, shutdownPool } from './executor'
 
 
 const log = createLogger('SERVER')
-const app = Fastify({ logger: false })
+const app = Fastify({ logger: false, trustProxy: true })
 
 const NODE_ENV = process.env.NODE_ENV ?? 'development'
 
