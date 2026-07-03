@@ -369,10 +369,22 @@ function highlightLine(line: string, lang: Lang, state: HlState): { html: string
         out += span(C.punc, chunk[0] === "<" && chunk[1] === "/" ? "</" : "<")
         out += span(C.tag, tagMatch[1])
         const afterTag = chunk.slice(tagMatch[0].length)
-        // attributes
-        out += afterTag.replace(/([A-Za-z][\w-]*)(\s*=\s*)(["'][^"']*["'])?/g, (_, a, eq, v) =>
-          span(C.attr, a) + span(C.punc, eq) + (v ? span(C.str, v) : ""))
-          .replace(/>$/, span(C.punc, ">"))
+        // attributes — manual loop to escape unmatched text between attr tokens (prevents XSS)
+        let attrHtml = ''
+        let lastIdx = 0
+        const attrRe = /([A-Za-z][\w-]*)(\s*=\s*)(["'][^"']*["'])?/g
+        let attrM: RegExpExecArray | null
+        while ((attrM = attrRe.exec(afterTag)) !== null) {
+          attrHtml += escapeHtml(afterTag.slice(lastIdx, attrM.index))
+          const [, a, eq, v] = attrM
+          attrHtml += span(C.attr, a) + span(C.punc, eq) + (v ? span(C.str, v) : '')
+          lastIdx = attrM.index + attrM[0].length
+        }
+        const remainder = afterTag.slice(lastIdx)
+        attrHtml += remainder.endsWith('>')
+          ? escapeHtml(remainder.slice(0, -1)) + span(C.punc, '>')
+          : escapeHtml(remainder)
+        out += attrHtml
       } else {
         out += span(C.punc, chunk)
       }
