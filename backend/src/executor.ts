@@ -1,6 +1,19 @@
 import { spawn } from 'child_process'
 import { format as prettierFormat } from 'prettier'
 
+// Fail-fast: if Docker is reached over TCP, TLS must be explicitly enabled.
+// A missing DOCKER_TLS_VERIFY (e.g. env not loaded, typo in deploy) would
+// expose every docker exec command in plaintext on the LAN.
+;(function assertDockerTls() {
+  const host = process.env.DOCKER_HOST ?? ''
+  if (host.startsWith('tcp://') && process.env.DOCKER_TLS_VERIFY !== '1') {
+    throw new Error(
+      `DOCKER_HOST points to a TCP address (${host}) but DOCKER_TLS_VERIFY is not '1'. ` +
+      'Set DOCKER_TLS_VERIFY=1 and DOCKER_CERT_PATH, or use a Unix socket instead.'
+    )
+  }
+})()
+
 type ExecResult = { output: string; error: string; exitCode: number; duration: number }
 
 type LangConfig = {
@@ -37,12 +50,11 @@ const LANG_CONFIGS: Record<string, LangConfig> = {
   shell:  { image: 'alpine:3.20',          filename: 'script.sh',  runCmd: f => `sh ${f}` },
 }
 
-// Code is embedded as base64 in the shell command so stdin remains free
-// for user input. `printf %s` avoids the trailing newline that `echo` adds,
-// which matters for binary-safe decoding.
-function buildShCmd(config: LangConfig, codeBase64: string): string {
+// Code is passed via the CODEROOM_CODE env var (set with docker -e) so it
+// never touches shell quoting. stdin remains free for user input.
+function buildShCmd(config: LangConfig): string {
   const f = `/tmp/${config.filename}`
-  const decode = `printf '%s' '${codeBase64}' | base64 -d > ${f}`
+  const decode = `printf '%s' "$CODEROOM_CODE" | base64 -d > ${f}`
   return `${decode} && ${config.runCmd(f)}`
 }
 
@@ -160,7 +172,7 @@ export async function executeCode(language: string, code: string, stdin?: string
   }
 
   const codeBase64 = Buffer.from(code).toString('base64')
-  const shCmd = buildShCmd(config, codeBase64)
+  const shCmd = buildShCmd(config)
   const timeoutMs = config.timeoutMs ?? INTERP_TIMEOUT
   const stdinPayload = stdin ?? ''
 
@@ -168,7 +180,7 @@ export async function executeCode(language: string, code: string, stdin?: string
     const containerId = await acquireContainer(language)
     if (containerId) {
       const result = await runProcess(
-        'docker', ['exec', '-i', containerId, 'sh', '-c', shCmd],
+        'docker', ['exec', '-i', '-e', `CODEROOM_CODE=${codeBase64}`, containerId, 'sh', '-c', shCmd],
         stdinPayload, start, timeoutMs
       )
       killContainer(containerId)
@@ -191,6 +203,7 @@ export async function executeCode(language: string, code: string, stdin?: string
       '--read-only',
       '--tmpfs',       '/tmp:size=256m',
       '--stop-timeout','5',
+      '-e', `CODEROOM_CODE=${codeBase64}`,
       ...envFlags,
       config.image,
       'sh', '-c', shCmd,
