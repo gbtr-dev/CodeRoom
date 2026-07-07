@@ -235,6 +235,11 @@ const stmtDeleteSessionById = db.prepare('DELETE FROM sessions WHERE id = ?')
 const stmtDeleteSessionsByUser = db.prepare('DELETE FROM sessions WHERE user_id = ?')
 const stmtDeleteOtherSessions = db.prepare('DELETE FROM sessions WHERE user_id = ? AND id != ?')
 const stmtDeleteExpiredSessions = db.prepare('DELETE FROM sessions WHERE expires_at <= ?')
+const stmtPruneUserSessions = db.prepare(`
+  DELETE FROM sessions WHERE user_id = ? AND id NOT IN (
+    SELECT id FROM sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT 10
+  )
+`)
 
 // Login attempts
 const stmtGetLoginAttempt = db.prepare('SELECT count, first_attempt_at, locked_until FROM login_attempts WHERE email = ?')
@@ -541,6 +546,7 @@ export function dbRemoveMember(userId: string, roomId: string) {
 
 export function dbCreateSession(token: string, userId: string, expiresAt: number) {
   stmtInsertSession.run(token, userId, expiresAt)
+  stmtPruneUserSessions.run(userId, userId)
 }
 
 export function dbGetSession(token: string) {
