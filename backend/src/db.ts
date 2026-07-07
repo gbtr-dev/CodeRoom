@@ -273,7 +273,7 @@ const stmtDeleteMembersByRoom = db.prepare('DELETE FROM room_members WHERE room_
 const stmtSelectMemberRole = db.prepare('SELECT role FROM room_members WHERE user_id = ? AND room_id = ?')
 const stmtUpdateMemberRole = db.prepare('UPDATE room_members SET role = ? WHERE user_id = ? AND room_id = ?')
 const stmtSelectRoomMembers = db.prepare(`
-  SELECT u.id, u.name, u.email, rm.role, rm.last_seen
+  SELECT u.id, u.name, rm.role, rm.last_seen
   FROM room_members rm
   JOIN users u ON u.id = rm.user_id
   WHERE rm.room_id = ?
