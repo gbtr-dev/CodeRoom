@@ -7,6 +7,7 @@ import type { TextPatch } from "./textPatch"
 import type { FileNode, Lang, RemoteParticipant } from "./highlight"
 import { RUN_CMD } from "./highlight"
 import type { User } from "@/components/auth-provider"
+import { sanitizeAvatar } from "@/components/auth-provider"
 
 /* ------------------------------------------------------------------ */
 /* Tipi                                                                 */
@@ -172,11 +173,11 @@ export function useSocket(
       }
       setRoomName(incomingName ?? null)
       if (incomingHasPassword !== undefined) setRoomHasPassword(incomingHasPassword)
-      if (chatHistory) setChatMessages(chatHistory)
+      if (chatHistory) setChatMessages(chatHistory.map(m => ({ ...m, avatar: sanitizeAvatar(m.avatar) })))
       setParticipants(
         parts
           .filter((p) => p.id !== socket.id)
-          .map((p) => ({ ...p, fileId: cb.current.activeIdRef.current, dbUserId: p.dbUserId, dbRole: p.dbRole as any, avatar: (p as any).avatar ?? null })),
+          .map((p) => ({ ...p, fileId: cb.current.activeIdRef.current, dbUserId: p.dbUserId, dbRole: p.dbRole as any, avatar: sanitizeAvatar((p as any).avatar) })),
       )
       if (incomingRole) setMyRole(incomingRole as Role)
       
@@ -200,7 +201,7 @@ export function useSocket(
     socket.on("participant-joined", (p: { id: string; name: string; color: string; dbUserId?: string; dbRole?: string; avatar?: string | null }) => {
       setParticipants((prev) => [
         ...prev.filter((x) => x.id !== p.id),
-        { ...p, fileId: cb.current.activeIdRef.current, dbUserId: p.dbUserId, dbRole: p.dbRole as any, avatar: p.avatar },
+        { ...p, fileId: cb.current.activeIdRef.current, dbUserId: p.dbUserId, dbRole: p.dbRole as any, avatar: sanitizeAvatar(p.avatar) },
       ])
     })
 
@@ -374,7 +375,7 @@ export function useSocket(
     })
 
     socket.on("chat-message", (msg: ChatMessage) => {
-      setChatMessages((prev) => [...prev, msg])
+      setChatMessages((prev) => [...prev, { ...msg, avatar: sanitizeAvatar(msg.avatar) }])
     })
 
     return () => {

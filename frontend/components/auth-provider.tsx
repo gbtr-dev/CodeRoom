@@ -24,6 +24,10 @@ type AuthContextValue = {
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001"
 
+export function sanitizeAvatar(avatar: string | null | undefined): string | null {
+  return avatar?.startsWith('data:image/') ? avatar : null
+}
+
 const AuthContext = createContext<AuthContextValue | null>(null)
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -37,7 +41,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     fetch(`${BACKEND_URL}/auth/me`, { credentials: "include" })
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
-        if (data?.user) setUser(data.user)
+        if (data?.user) setUser({ ...data.user, avatar: sanitizeAvatar(data.user.avatar) })
       })
       .catch(() => {})
       .finally(() => setReady(true))
@@ -53,7 +57,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       })
       const data = await res.json()
       if (!res.ok) return { error: data.error ?? "Login failed" }
-      setUser(data.user)
+      setUser({ ...data.user, avatar: sanitizeAvatar(data.user.avatar) })
       return {}
     } catch {
       return { error: "Cannot connect to server" }
@@ -70,7 +74,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       })
       const data = await res.json()
       if (!res.ok) return { error: data.error ?? "Signup failed" }
-      setUser(data.user)
+      setUser({ ...data.user, avatar: sanitizeAvatar(data.user.avatar) })
       return {}
     } catch {
       return { error: "Cannot connect to server" }
