@@ -383,7 +383,8 @@ export function dbRenameFile(fileId: string, roomId: string, name: string): bool
 
 
 export function dbMoveFile(fileId: string, roomId: string, parentId: string): boolean {
-  // Spostare in 'root' non può mai creare un ciclo — skip del check.
+  if (fileId === 'root') return false
+  // Moving to 'root' can never create a cycle — skip the check.
   if (parentId !== 'root') {
     const descendants = stmtGetDescendants.all(fileId, roomId) as { id: string }[]
     const isDescendant = descendants.some((row) => row.id === parentId)
