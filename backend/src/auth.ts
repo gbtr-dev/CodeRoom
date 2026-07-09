@@ -237,7 +237,11 @@ export async function registerAuthRoutes(app: FastifyInstance) {
     // Get user's rooms (cursor-based pagination)
     protectedRoutes.get('/auth/rooms', async (req, reply) => {
       const query = req.query as { cursor?: string }
-      const cursor = query.cursor ? Number(query.cursor) : undefined
+      const cursorRaw = query.cursor ? Number(query.cursor) : undefined
+      if (cursorRaw !== undefined && (!Number.isInteger(cursorRaw) || cursorRaw < 0)) {
+        return reply.status(400).send({ error: 'Invalid cursor' })
+      }
+      const cursor = cursorRaw
       const result = dbGetUserRooms(req.userId, cursor)
       return reply.send(result)
     })
