@@ -302,8 +302,13 @@ export function registerSocketHandlers(io: Server) {
       }
 
       if (!notified) {
-        socket.emit('knock-denied')
-        pendingKnocks.delete(socket.id)
+        // Random delay to prevent timing-based detection of owner presence.
+        const delay = 1000 + Math.random() * 2000
+        setTimeout(() => {
+          clearTimeout(knockTimeoutId)
+          pendingKnocks.delete(socket.id)
+          socket.emit('knock-denied')
+        }, delay)
         log.info(`[ROOM] Knock auto-denied (no owner online) — user = ${currentUser} | room = ${roomId}`)
       } else {
         socket.emit('knock-pending')
