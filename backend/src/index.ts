@@ -62,6 +62,13 @@ setInterval(() => {
   }
 }, SESSION_CLEANUP_INTERVAL_MS).unref()
 
+setInterval(() => {
+  const deleted = dbDeleteExpiredInvites()
+  if (deleted > 0) {
+    log.info('Pulizia periodica inviti scaduti', { deleted })
+  }
+}, SESSION_CLEANUP_INTERVAL_MS).unref()
+
 app.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
   try { done(null, JSON.parse(body as string)) }
   catch (e) { done(e as Error, undefined) }
