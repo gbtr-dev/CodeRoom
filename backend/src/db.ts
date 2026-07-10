@@ -104,7 +104,6 @@ db.exec(`
     room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
     user_id TEXT,
     user_name TEXT NOT NULL,
-    avatar TEXT,
     content TEXT NOT NULL,
     created_at INTEGER NOT NULL DEFAULT (unixepoch())
   );
@@ -138,6 +137,12 @@ if (!memberColumns.some((c) => c.name === 'role')) {
       SELECT created_by, id FROM rooms WHERE created_by IS NOT NULL
     )
   `)
+}
+
+// Migration: drop redundant avatar column from chat_messages (avatar now joined from users)
+const chatColumns = db.prepare(`PRAGMA table_info(chat_messages)`).all() as { name: string }[]
+if (chatColumns.some((c) => c.name === 'avatar')) {
+  db.exec(`ALTER TABLE chat_messages DROP COLUMN avatar`)
 }
 
 /* ------------------------------------------------------------------ */
@@ -624,14 +629,15 @@ export function dbDeleteRoomInvites(roomId: string) {
 /* ------------------------------------------------------------------ */
 
 const stmtInsertChatMessage = db.prepare(`
-  INSERT INTO chat_messages (room_id, user_id, user_name, avatar, content)
-  VALUES (?, ?, ?, ?, ?)
+  INSERT INTO chat_messages (room_id, user_id, user_name, content)
+  VALUES (?, ?, ?, ?)
 `)
 const stmtSelectChatMessages = db.prepare(`
-  SELECT id, room_id, user_id, user_name, avatar, content, created_at
-  FROM chat_messages
-  WHERE room_id = ?
-  ORDER BY created_at DESC
+  SELECT cm.id, cm.room_id, cm.user_id, cm.user_name, u.avatar, cm.content, cm.created_at
+  FROM chat_messages cm
+  LEFT JOIN users u ON cm.user_id = u.id
+  WHERE cm.room_id = ?
+  ORDER BY cm.created_at DESC
   LIMIT 50
 `)
 const stmtDeleteChatByRoom = db.prepare('DELETE FROM chat_messages WHERE room_id = ?')
@@ -647,7 +653,7 @@ export type ChatMessage = {
 }
 
 export function dbSaveChatMessage(roomId: string, userId: string | null, userName: string, avatar: string | null, content: string): ChatMessage {
-  const info = stmtInsertChatMessage.run(roomId, userId, userName, avatar, content)
+  const info = stmtInsertChatMessage.run(roomId, userId, userName, content)
   return { id: info.lastInsertRowid as number, room_id: roomId, user_id: userId, user_name: userName, avatar, content, created_at: Math.floor(Date.now() / 1000) }
 }
 
