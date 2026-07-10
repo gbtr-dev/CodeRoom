@@ -14,9 +14,6 @@ const csp = [
 
 const nextConfig = {
   devIndicators: false,
-  typescript: {
-    ignoreBuildErrors: true,
-  },
   images: {
     unoptimized: true,
   },
