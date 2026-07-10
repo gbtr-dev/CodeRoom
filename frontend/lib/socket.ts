@@ -1,6 +1,6 @@
 import { io } from 'socket.io-client'
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:3001'
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:45032'
 
 export function createSocket() {
   const url = new URL(BACKEND_URL)

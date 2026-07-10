@@ -56,7 +56,7 @@ import { FileTree, FileTreeContextMenu } from "@/components/room/FileTree"
 import type { Menu, Creating } from "@/components/room/FileTree"
 import ChatPanel from "@/components/ChatPanel"
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001"
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:45032"
 
 const FMT_LANGS = new Set(['js', 'jsx', 'ts', 'tsx', 'css', 'html', 'json', 'md', 'py', 'go', 'rust'])
 

@@ -201,7 +201,7 @@ export default function RoomsPage() {
   // Fetch rooms from backend
   useEffect(() => {
     if (!user) return
-    const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001"
+    const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:45032"
     fetch(`${BACKEND_URL}/auth/rooms`, { credentials: "include" })
       .then((r) => r.json())
       .then((d) => { if (d.rooms) { setRooms(d.rooms); setNextCursor(d.nextCursor ?? null) } })
@@ -211,7 +211,7 @@ export default function RoomsPage() {
 
   async function loadMore() {
     if (!nextCursor || loadingMore) return
-    const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001"
+    const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:45032"
     setLoadingMore(true)
     try {
       const r = await fetch(`${BACKEND_URL}/auth/rooms?cursor=${nextCursor}`, { credentials: "include" })
@@ -282,7 +282,7 @@ export default function RoomsPage() {
   async function commitRename(id: string) {
     const name = renameValue.trim().slice(0, 60)
     setRenamingId(null)
-    const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001"
+    const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:45032"
     try {
       const res = await fetch(`${BACKEND_URL}/auth/rooms/${encodeURIComponent(id)}/name`, {
         method: "PUT",
@@ -300,7 +300,7 @@ export default function RoomsPage() {
   async function deleteRoom() {
     if (!deletingRoom) return
     const id = deletingRoom.id
-    const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001"
+    const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:45032"
     setDeleteLoading(true)
     try {
       const res = await fetch(`${BACKEND_URL}/auth/rooms/${encodeURIComponent(id)}`, {
@@ -320,7 +320,7 @@ export default function RoomsPage() {
   async function leaveRoom() {
     if (!leavingRoom) return
     const id = leavingRoom.id
-    const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001"
+    const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:45032"
     setLeaveLoading(true)
     try {
       const res = await fetch(`${BACKEND_URL}/auth/rooms/${encodeURIComponent(id)}/leave`, {

@@ -342,7 +342,7 @@ const setupSteps = [
   {
     n: "03",
     title: "Frontend",
-    code: `cd frontend\nnpm install\n\n# Create frontend/.env.local\n# NEXT_PUBLIC_BACKEND_URL=http://localhost:3001\n\nnpm run dev    # port 3000`,
+    code: `cd frontend\nnpm install\n\n# Create frontend/.env.local\n# NEXT_PUBLIC_BACKEND_URL=http://localhost:45032\n\nnpm run dev    # port 45031`,
     lang: "bash",
   },
   {
@@ -658,7 +658,7 @@ export default function DocsPage() {
                 <SectionLabel>04 · Env Vars</SectionLabel>
                 <SectionTitle>Environment variables</SectionTitle>
                 <p className="mt-3 text-[14px] leading-relaxed text-[#666]">
-                  A single <code className="font-mono text-[#4ade80]">.env</code> file lives in the <code className="font-mono text-[#4ade80]">backend/</code> folder. The frontend has no environment file — it connects to the backend at the hardcoded default <code className="font-mono text-[#4ade80]">http://localhost:3001</code>.
+                  A single <code className="font-mono text-[#4ade80]">.env</code> file lives in the <code className="font-mono text-[#4ade80]">backend/</code> folder. The frontend has no environment file — it connects to the backend at the hardcoded default <code className="font-mono text-[#4ade80]">http://localhost:45032</code>.
                 </p>
               </FadeIn>
 

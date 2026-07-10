@@ -584,7 +584,7 @@ export default function LandingPage() {
 
   useEffect(() => {
     if (!user) return
-    const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001"
+    const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:45032"
     fetch(`${BACKEND_URL}/auth/rooms`, { credentials: "include" })
       .then((r) => r.json())
       .then((d) => { if (d.rooms) setUserRooms(d.rooms) })
