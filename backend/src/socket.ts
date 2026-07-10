@@ -16,7 +16,7 @@ import { executeCode, formatCode } from './executor'
 import { dbRoomExists, dbAddRoomMember, dbCreateRoom, dbCreateRoomWithOwner, dbGetUserById, dbSetRoomName, dbGetRoom, dbGetMemberRole, dbSetMemberRole, dbGetRoomMembers, dbRemoveMember, dbRenameFile, dbMoveFile, dbSaveChatMessage, dbGetChatMessages, type RoomRole } from './db'
 import { verifySessionToken, SESSION_COOKIE_NAME } from './auth'
 import bcrypt from 'bcryptjs'
-import { createLogger } from './logger'
+import { createLogger, maskEmail } from './logger'
 import { checkRateLimit } from './rateLimiter'
 import { safeOn } from './safeHandler'
 import { LIMITS, isString, isNonEmptyString, isBoundedString, isValidId, isNonNegativeInt, isFileKind, isValidFileName } from './validation'
@@ -137,7 +137,7 @@ export function registerSocketHandlers(io: Server) {
         avatar: participant.avatar ?? null,
       })
 
-      log.info(`[ROOM] User admitted — user = ${admittedName} | email = ${admittedEmail} | role = ${role} | room = ${roomId}`)
+      log.info(`[ROOM] User admitted — user = ${admittedName} | email = ${maskEmail(admittedEmail)} | role = ${role} | room = ${roomId}`)
     }
 
     const cookieHeader = socket.handshake.headers.cookie
@@ -217,7 +217,7 @@ export function registerSocketHandlers(io: Server) {
           hasPassword: false,
         })
 
-        log.info(`[ROOM] Room created — user = ${currentUser} | email = ${currentUserEmail} | role = ${role} | room = ${roomId}`)
+        log.info(`[ROOM] Room created — user = ${currentUser} | email = ${maskEmail(currentUserEmail)} | role = ${role} | room = ${roomId}`)
         return
       }
 
@@ -287,7 +287,7 @@ export function registerSocketHandlers(io: Server) {
         }
       }, 60_000)
       pendingKnocks.set(socket.id, { userId: currentUserId, userName: currentUser, roomId, timeoutId: knockTimeoutId })
-      log.info(`[ROOM] Knock received — user = ${currentUser} | email = ${currentUserEmail} | room = ${roomId}`)
+      log.info(`[ROOM] Knock received — user = ${currentUser} | email = ${maskEmail(currentUserEmail)} | room = ${roomId}`)
 
       const room = getOrCreateRoom(roomId)
       let notified = false
@@ -409,7 +409,7 @@ export function registerSocketHandlers(io: Server) {
       if (!currentRoom || !socket.data.admitted) return
       if (getRole(socket) === 'viewer') return
       const node = createFile(currentRoom, parentId, name, type, content)
-      log.info(`[ROOM] File created — file = ${name} | user = ${currentUser} |  email = ${currentUserEmail} | room = ${currentRoom}`)
+      log.info(`[ROOM] File created — file = ${name} | user = ${currentUser} | email = ${maskEmail(currentUserEmail)} | room = ${currentRoom}`)
       if (typeof callback === 'function') callback(node)
       io.to(currentRoom).emit('file-created', { node, parentId: node.parentId })
     })
@@ -461,7 +461,7 @@ export function registerSocketHandlers(io: Server) {
       if (getRole(socket) !== 'owner') return
       const savedName = dbSetRoomName(currentRoom, name.slice(0, LIMITS.ROOM_NAME))
       io.to(currentRoom).emit('room-renamed', { name: savedName })
-      log.info(`[ROOM] Room renamed — name = ${savedName} | user = ${currentUser} |  email = ${currentUserEmail} | room = ${currentRoom}`)
+      log.info(`[ROOM] Room renamed — name = ${savedName} | user = ${currentUser} | email = ${maskEmail(currentUserEmail)} | room = ${currentRoom}`)
     })
 
     safeOn(socket, 'delete-file', ({ fileId }: { fileId: string }) => {
@@ -628,7 +628,7 @@ export function registerSocketHandlers(io: Server) {
         }
       }
       socket.to(currentRoom).emit('participant-left', { id: socket.id })
-      log.info(`[ROOM] User left — user = ${currentUser} |  email = ${currentUserEmail} | room = ${currentRoom}`)
+      log.info(`[ROOM] User left — user = ${currentUser} | email = ${maskEmail(currentUserEmail)} | room = ${currentRoom}`)
     })
   })
 }
