@@ -134,6 +134,9 @@ export async function registerAuthRoutes(app: FastifyInstance) {
     if (!name || !email || !password) {
       return reply.status(400).send({ error: 'Name, email and password are required' })
     }
+    if (!name.trim()) {
+      return reply.status(400).send({ error: 'Name is required' })
+    }
     if (name.trim().length > 60) {
       return reply.status(400).send({ error: 'Name must be 60 characters or less' })
     }
@@ -394,9 +397,11 @@ export async function registerAuthRoutes(app: FastifyInstance) {
     // Update display name
     protectedRoutes.put('/auth/me/name', async (req, reply) => {
       const { name } = req.body as { name: string }
-      if (!name?.trim()) return reply.status(400).send({ error: 'Name is required' })
+      const trimmedName = name?.trim()
+      if (!trimmedName) return reply.status(400).send({ error: 'Name is required' })
+      if (trimmedName.length > 60) return reply.status(400).send({ error: 'Name must be 60 characters or less' })
 
-      dbUpdateUserName(req.userId, name)
+      dbUpdateUserName(req.userId, trimmedName)
       const user = dbGetUserById(req.userId)
       log.info('User name updated', { userId: req.userId })
       return reply.send({ user })
