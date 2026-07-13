@@ -474,7 +474,7 @@ export function registerSocketHandlers(io: Server) {
         return
       }
       io.to(currentRoom).emit('file-deleted', { fileId })
-      log.info(`[ROOM] File deleted — file = ${fileId} | user = ${currentUser} |  email = ${currentUserEmail} | room = ${currentRoom}`)
+      log.info(`[ROOM] File deleted — file = ${fileId} | user = ${currentUser} | email = ${maskEmail(currentUserEmail)} | room = ${currentRoom}`)
     })
 
     safeOn(socket, 'run-code', async ({ language, code, stdin }: { language: string; code: string; stdin?: string }) => {
