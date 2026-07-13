@@ -366,7 +366,9 @@ export async function registerAuthRoutes(app: FastifyInstance) {
     // ── Settings routes ────────────────────────────────────────────────
 
     // Upload / replace avatar
-    protectedRoutes.put('/auth/me/avatar', async (req, reply) => {
+    protectedRoutes.put('/auth/me/avatar', {
+      config: { rateLimit: { max: 10, timeWindow: '1 minute' } },
+    }, async (req, reply) => {
       const { avatar } = req.body as { avatar?: string }
       if (!avatar || typeof avatar !== 'string') return reply.status(400).send({ error: 'avatar is required' })
       // Whitelist raster-only MIME types. data:image/svg+xml is excluded because
