@@ -24,7 +24,7 @@ if (NODE_ENV === 'production' && !process.env.CORS_ORIGIN) {
   process.exit(1)
 }
 
-const CORS_ORIGIN = process.env.CORS_ORIGIN ?? 'http://localhost:3000'
+const CORS_ORIGIN = process.env.CORS_ORIGIN ?? 'http://localhost:45031'
 
 app.register(cors, {
   origin: CORS_ORIGIN,
