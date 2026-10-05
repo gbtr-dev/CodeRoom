@@ -9,10 +9,6 @@ import { RUN_CMD } from "./highlight"
 import type { User } from "@/components/auth-provider"
 import { sanitizeAvatar } from "@/components/auth-provider"
 
-/* ------------------------------------------------------------------ */
-/* Tipi                                                                 */
-/* ------------------------------------------------------------------ */
-
 export type OutputLine = { t: string; kind: "info" | "ok" | "muted" | "out" | "err" }
 export type Knock = { knockId: string; userName: string; avatar?: string | null }
 export type Role = "owner" | "editor" | "viewer"
@@ -221,9 +217,7 @@ export function useSocket(
     })
 
     socket.on("member-kicked", ({ userId }: { userId: string }) => {
-      // Rimuovi subito il membro dalla lista, senza aspettare 'participant-left'
       setParticipants((prev) => prev.filter((p) => p.dbUserId !== userId))
-      // Se sei tu quello che è stato kickato, esci dalla room
       if (userId === user.id) {
         router.replace(`/rooms?error=kicked`)
       }
@@ -243,16 +237,11 @@ export function useSocket(
 
     socket.on("code-patch", ({ fileId, start, deleteCount, insert }: TextPatch & { fileId: string }) => {
       const apply = (text: string) => applyTextPatch(text, { start, deleteCount, insert })
-      // Patch lastSyncedContent synchronously so it stays ahead of React state.
-      // This avoids the race where setNodes from a prior code-update hasn't run yet
-      // and n.content is stale when the patch callback executes.
       const synced = cb.current.lastSyncedContent.current[fileId]
       if (synced !== undefined) cb.current.lastSyncedContent.current[fileId] = apply(synced)
       cb.current.setNodes((prev) => {
         return prev.map((n) => {
           if (n.id !== fileId) return n
-          // Use the already-patched ref as ground truth; fall back to patching n.content
-          // only when the file hasn't been synced yet (e.g. first patch ever).
           const content = cb.current.lastSyncedContent.current[fileId] ?? apply(n.content ?? "")
           return { ...n, content }
         })
@@ -329,7 +318,6 @@ export function useSocket(
         if (prev.find((n) => n.id === node.id)) return prev
         return [...prev, newNode]
       })
-      // During import we open the file manually at the end — skip auto-open here
       if (node.type === "file" && !cb.current.importingRef.current) cb.current.openFile(node.id)
     })
 

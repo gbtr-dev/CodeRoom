@@ -55,11 +55,6 @@ export function useImportExport({
   const importFileInputRef = useRef<HTMLInputElement>(null)
   const importZipInputRef = useRef<HTMLInputElement>(null)
 
-  // Crea un file/cartella sul server e attende l'id reale assegnato dal
-  // backend. Lo stato locale (`nodes`) viene aggiornato automaticamente dal
-  // listener "file-created" registrato in useSocket, quindi qui ci limitiamo
-  // a risolvere la promise per poter incatenare le creazioni (es. cartelle
-  // annidate durante un import).
   function createFileAsync(
     parentId: string | null,
     name: string,
@@ -180,8 +175,7 @@ export function useImportExport({
         }
       })
 
-      // Build the entry list ordered so parents always come before children.
-      // We assign temporary IDs client-side; the backend resolves them to real UUIDs.
+
       let tempCounter = 0
       const nextTempId = () => `tmp-${++tempCounter}`
 
@@ -213,7 +207,6 @@ export function useImportExport({
 
       if (entries.length === 0) return
 
-      // Single round-trip: send everything at once
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => reject(new Error("ZIP import timed out")), 30_000)
         socketRef.current?.emit("import-zip", { entries }, (idMap: Record<string, string>) => {
@@ -222,8 +215,7 @@ export function useImportExport({
             reject(new Error("Import rejected: too many entries or total size exceeded"))
             return
           }
-          // files-imported event already updated nodes for all clients;
-          // just open the first file for the importer
+
           if (firstFileTempId) {
             const firstRealId = idMap[firstFileTempId]
             if (firstRealId) openFile(firstRealId)
