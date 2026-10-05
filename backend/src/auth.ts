@@ -34,7 +34,7 @@ import {
   dbDeleteInvite,
   type RoomRole,
 } from './db'
-import { notifyRoomDeleted, notifyUserLeftRoom, disconnectAllUserSockets } from './socket'
+import { notifyRoomDeleted, notifyUserLeftRoom, notifyMemberRoleChanged, notifyMemberRemoved, disconnectAllUserSockets, disconnectRevokedUserSockets } from './socket'
 import { createLogger, maskEmail } from './logger'
 import { checkLoginLock, recordLoginFailure, recordLoginSuccess } from './authRateLimiter'
 import { isValidEmail } from './validation'
@@ -66,11 +66,13 @@ export function createSession(userId: string): { token: string; expiresAt: numbe
   const token = generateSessionToken()
   const expiresAt = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS
   dbCreateSession(token, userId, expiresAt)
+  // Creating a session may prune older sessions beyond the account limit.
+  disconnectRevokedUserSockets(userId)
   return { token, expiresAt }
 }
 
 /** Verifica un token di sessione contro il DB. Ritorna null se assente, scaduto o invalido. */
-export function verifySessionToken(token: string): { userId: string } | null {
+export function verifySessionToken(token: string): { userId: string; expiresAt: number } | null {
   // Token = 32 random bytes in hex = exactly 64 lowercase hex chars
   if (token.length !== 64 || !/^[0-9a-f]+$/.test(token)) return null
 
@@ -83,17 +85,20 @@ export function verifySessionToken(token: string): { userId: string } | null {
     return null
   }
 
-  return { userId: session.user_id }
+  return { userId: session.user_id, expiresAt: session.expires_at }
 }
 
 /** Cancella la sessione corrente dal DB (logout). */
 export function destroySession(token: string) {
+  const session = dbGetSession(token)
   dbDeleteSession(token)
+  if (session) disconnectRevokedUserSockets(session.user_id)
 }
 
 /** Cancella tutte le altre sessioni dell'utente, mantenendo quella corrente (cambio password). */
 export function destroyOtherSessions(userId: string, keepToken: string) {
   dbDeleteOtherSessions(userId, keepToken)
+  disconnectRevokedUserSockets(userId)
 }
 
 declare module 'fastify' {
@@ -337,6 +342,7 @@ export async function registerAuthRoutes(app: FastifyInstance) {
       if (targetRole === 'owner') return reply.status(403).send({ error: 'Cannot change another owner\'s role' })
 
       dbSetMemberRole(userId, id, role)
+      notifyMemberRoleChanged(id, userId, role)
       log.info('Member role changed', { by: req.userId, target: userId, roomId: id, role })
       return reply.send({ userId, role })
     })
@@ -359,6 +365,7 @@ export async function registerAuthRoutes(app: FastifyInstance) {
       if (targetRole === 'owner') return reply.status(403).send({ error: 'Cannot remove another owner' })
 
       dbRemoveMember(userId, id)
+      notifyMemberRemoved(id, userId)
       log.info('Member removed', { by: req.userId, target: userId, roomId: id })
       return reply.send({ success: true })
     })
@@ -483,7 +490,6 @@ export async function registerAuthRoutes(app: FastifyInstance) {
 
     protectedRoutes.post('/auth/logout', async (req, reply) => {
       destroySession(req.sessionToken)
-      disconnectAllUserSockets(req.userId)
       reply.clearCookie(SESSION_COOKIE_NAME, { path: '/' })
       log.info('User logged out', { userId: req.userId })
       return reply.send({ success: true })

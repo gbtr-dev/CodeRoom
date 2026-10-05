@@ -27,6 +27,9 @@ const log = createLogger('SOCKET')
 let ioInstance: Server | null = null
 
 const userRoomSockets = new Map<string, Set<Socket>>()
+// Track authenticated connections before admission too: password checks and
+// pending knocks must not outlive a revoked session or room membership.
+const connectionAccess = new Map<Socket, { userId: string | null; token?: string; roomId: string | null }>()
 
 function userRoomKey(roomId: string, userId: string) {
   return `${roomId}:${userId}`
@@ -60,30 +63,69 @@ function setRole(socket: Socket, role: RoomRole) {
 }
 
 export function notifyRoomDeleted(roomId: string) {
-  ioInstance?.to(roomId).emit('room-deleted', { roomId })
-  ioInstance?.in(roomId).socketsLeave(roomId)
+  for (const [socket, access] of connectionAccess) {
+    if (access.roomId !== roomId) continue
+    socket.emit('room-deleted', { roomId })
+    socket.disconnect(true)
+  }
   removeRoom(roomId)
 }
 
 export function notifyUserLeftRoom(roomId: string, userId: string) {
-  for (const targetSocket of getUserSockets(roomId, userId)) {
-    targetSocket.disconnect(true)
+  for (const [socket, access] of connectionAccess) {
+    if (access.roomId === roomId && access.userId === userId) socket.disconnect(true)
   }
+}
+
+export function notifyMemberRoleChanged(roomId: string, userId: string, role: RoomRole) {
+  for (const socket of getUserSockets(roomId, userId)) {
+    setRole(socket, role)
+    const participant = getOrCreateRoom(roomId).participants.get(socket.id)
+    if (participant) participant.role = role
+    socket.emit('role-refreshed', { role })
+  }
+  ioInstance?.to(roomId).emit('member-role-changed', { userId, role })
+}
+
+export function notifyMemberRemoved(roomId: string, userId: string) {
+  ioInstance?.to(roomId).emit('member-kicked', { userId })
+  notifyUserLeftRoom(roomId, userId)
+}
+
+function expireSocket(socket: Socket) {
+  socket.emit('session-expired')
+  socket.disconnect(true)
 }
 
 export function disconnectAllUserSockets(userId: string) {
-  const suffix = `:${userId}`
-  for (const [key, sockets] of userRoomSockets.entries()) {
-    if (!key.endsWith(suffix)) continue
-    for (const s of sockets) {
-      s.emit('session-expired')
-      s.disconnect(true)
-    }
+  for (const [socket, access] of connectionAccess) {
+    if (access.userId === userId) expireSocket(socket)
   }
 }
 
-const pendingKnocks = new Map<string, { userId: string | null; userName: string; roomId: string; timeoutId: ReturnType<typeof setTimeout> }>()
+export function disconnectRevokedUserSockets(userId: string) {
+  for (const [socket, access] of connectionAccess) {
+    if (access.userId !== userId || !access.token) continue
+    if (verifySessionToken(access.token)?.userId !== userId) expireSocket(socket)
+  }
+}
+
+type PendingKnock = {
+  userId: string | null
+  userName: string
+  roomId: string
+  timeoutId: ReturnType<typeof setTimeout>
+  admit: () => void
+}
+const pendingKnocks = new Map<string, PendingKnock>()
 const MAX_PENDING_KNOCKS_PER_ROOM = 20
+
+function cancelPendingKnock(socketId: string) {
+  const knock = pendingKnocks.get(socketId)
+  if (!knock) return
+  clearTimeout(knock.timeoutId)
+  pendingKnocks.delete(socketId)
+}
 
 export function registerSocketHandlers(io: Server) {
   ioInstance = io
@@ -93,33 +135,111 @@ export function registerSocketHandlers(io: Server) {
     let currentUserEmail: string = 'unknown'
     let currentUserId: string | null = null
     let currentAvatar: string | null = null
+    let joinAttempt = 0
+    let sessionExpiryTimer: ReturnType<typeof setTimeout> | undefined
 
-    function admitUser(roomId: string, admittedSocket: Socket, admittedUserId: string | null, admittedName: string, admittedEmail: string, admittedAvatar?: string | null, preloadedRow?: ReturnType<typeof dbGetRoom>) {
-      admittedSocket.join(roomId)
-      admittedSocket.data.admitted = true
+    function hasValidSession() {
+      if (!socket.connected) return false
+      const access = connectionAccess.get(socket)
+      if (!access?.userId) return true // Anonymous guests require owner approval.
+      if (access.token && verifySessionToken(access.token)?.userId === access.userId) return true
+      expireSocket(socket)
+      return false
+    }
 
-      let role: RoomRole = 'viewer'
-      if (admittedUserId) {
-        const existingRole = dbGetMemberRole(admittedUserId, roomId)
-        if (!existingRole) {
-          dbAddRoomMember(admittedUserId, roomId, 'viewer')
-        } else {
-          dbAddRoomMember(admittedUserId, roomId, existingRole)
+    function armSessionExpiry(expiresAt: number) {
+      // Node timers cap at ~24.8 days; sessions last 30 days. Re-arm long timers.
+      const delay = Math.min(Math.max(expiresAt * 1000 - Date.now(), 1), 2_147_483_647)
+      sessionExpiryTimer = setTimeout(() => {
+        if (!socket.connected) return
+        const access = connectionAccess.get(socket)
+        const session = access?.token ? verifySessionToken(access.token) : null
+        if (session && session.userId === access?.userId) armSessionExpiry(session.expiresAt)
+        else expireSocket(socket)
+      }, delay)
+      sessionExpiryTimer.unref()
+    }
+
+    function onClientEvent(event: string, handler: (...args: any[]) => unknown) {
+      safeOn(socket, event, (...args) => {
+        if (!hasValidSession()) return
+        if (currentRoom && socket.data.admitted) {
+          if (!dbRoomExists(currentRoom)) {
+            notifyRoomDeleted(currentRoom)
+            return
+          }
+          if (currentUserId) {
+            const role = dbGetMemberRole(currentUserId, currentRoom)
+            if (!role) {
+              notifyMemberRemoved(currentRoom, currentUserId)
+              return
+            }
+            if (role !== getRole(socket)) notifyMemberRoleChanged(currentRoom, currentUserId, role)
+          }
         }
-        role = existingRole ?? 'viewer'
-        setRole(admittedSocket, role)
-        trackUserSocket(roomId, admittedUserId, admittedSocket)
+        return handler(...args)
+      })
+    }
+
+    function isCurrentAttempt(attempt: number) {
+      return attempt === joinAttempt && hasValidSession()
+    }
+
+    function leaveCurrentRoom() {
+      const roomId = currentRoom
+      const wasOwner = getRole(socket) === 'owner'
+      currentRoom = null
+      socket.data.admitted = false
+      setRole(socket, 'viewer')
+      if (!roomId) return
+
+      if (currentUserId) untrackUserSocket(roomId, currentUserId, socket)
+      socket.leave(roomId)
+      removeParticipant(roomId, socket.id)
+      if (wasOwner && !hasOnlineOwner(roomId)) {
+        for (const [knockId, knock] of pendingKnocks.entries()) {
+          if (knock.roomId === roomId) {
+            cancelPendingKnock(knockId)
+            io.sockets.sockets.get(knockId)?.emit('knock-denied')
+          }
+        }
+      }
+      socket.to(roomId).emit('participant-left', { id: socket.id })
+      log.info(`[ROOM] User left — user = ${currentUser} | email = ${maskEmail(currentUserEmail)} | room = ${roomId}`)
+    }
+
+    // Commit room access only for the latest request on this connection.
+    // Knock approvals call this closure on the requesting socket as well.
+    function admitUser(roomId: string, attempt: number) {
+      if (!isCurrentAttempt(attempt)) return
+      const roomRow = dbGetRoom(roomId)
+      if (!roomRow) {
+        socket.emit('room-not-found', { roomId })
+        return
       }
 
-      const participant = addParticipant(roomId, admittedSocket.id, admittedName, admittedUserId ?? undefined, role, admittedAvatar)
+      let role: RoomRole = 'viewer'
+      if (currentUserId) {
+        const existingRole = dbGetMemberRole(currentUserId, roomId)
+        role = existingRole ?? 'viewer'
+        dbAddRoomMember(currentUserId, roomId, role)
+        trackUserSocket(roomId, currentUserId, socket)
+      }
+
+      cancelPendingKnock(socket.id)
+      currentRoom = roomId
+      setRole(socket, role)
+      socket.join(roomId)
+      socket.data.admitted = true
+
+      const participant = addParticipant(roomId, socket.id, currentUser, currentUserId ?? undefined, role, currentAvatar)
       const room = getOrCreateRoom(roomId)
-      const roomRow = preloadedRow ?? dbGetRoom(roomId)
 
       const otherParticipants = Array.from(room.participants.entries())
-        .filter(([id]) => id !== admittedSocket.id)
+        .filter(([id]) => id !== socket.id)
         .map(([id, p]) => ({ id, name: p.name, color: p.color, dbUserId: p.userId, dbRole: p.role, avatar: p.avatar ?? null }))
 
-      admittedSocket.emit('room-state', {
+      socket.emit('room-state', {
         files: getRoomFiles(roomId),
         participants: otherParticipants,
         roomName: roomRow?.name ?? null,
@@ -128,8 +248,8 @@ export function registerSocketHandlers(io: Server) {
         hasPassword: !!roomRow?.password_hash,
       })
 
-      admittedSocket.to(roomId).emit('participant-joined', {
-        id: admittedSocket.id,
+      socket.to(roomId).emit('participant-joined', {
+        id: socket.id,
         name: participant.name,
         color: participant.color,
         dbUserId: participant.userId,
@@ -137,7 +257,7 @@ export function registerSocketHandlers(io: Server) {
         avatar: participant.avatar ?? null,
       })
 
-      log.info(`[ROOM] User admitted — user = ${admittedName} | email = ${maskEmail(admittedEmail)} | role = ${role} | room = ${roomId}`)
+      log.info(`[ROOM] User admitted — user = ${currentUser} | email = ${maskEmail(currentUserEmail)} | role = ${role} | room = ${roomId}`)
     }
 
     const cookieHeader = socket.handshake.headers.cookie
@@ -149,8 +269,14 @@ export function registerSocketHandlers(io: Server) {
         handshakeToken = undefined
       }
     }
+    const session = handshakeToken ? verifySessionToken(handshakeToken) : null
+    connectionAccess.set(socket, {
+      userId: session?.userId ?? null,
+      token: session ? handshakeToken : undefined,
+      roomId: null,
+    })
 
-    safeOn(socket, 'join-room', async ({
+    onClientEvent('join-room', async ({
       roomId,
       userName,
       isNew,
@@ -165,16 +291,23 @@ export function registerSocketHandlers(io: Server) {
     }) => {
       if (!checkRateLimit(socket, 'join-room')) return
       if (!isValidId(roomId)) return
-      currentRoom = roomId
+      if (!socket.connected) return
+      const attempt = ++joinAttempt
+      cancelPendingKnock(socket.id)
+      leaveCurrentRoom()
+      connectionAccess.get(socket)!.roomId = roomId
       currentUser = isNonEmptyString(userName, LIMITS.USER_NAME) ? userName : 'Anonymous'
+      currentUserId = null
+      currentUserEmail = 'unknown'
+      currentAvatar = null
 
       // Verify session token read from the httpOnly cookie
       if (handshakeToken) {
         const payload = verifySessionToken(handshakeToken)
         if (payload) {
-          currentUserId = payload.userId
           const dbUser = dbGetUserById(payload.userId)
           if (dbUser) {
+            currentUserId = dbUser.id
             currentUser = dbUser.name
             currentUserEmail = dbUser.email
             currentAvatar = dbUser.avatar ?? null
@@ -192,33 +325,14 @@ export function registerSocketHandlers(io: Server) {
           socket.emit('error', { message: 'Login required to create a room' })
           return
         }
-        // Creator: create room and add owner atomically (prevents race on concurrent join)
-        dbCreateRoomWithOwner(roomId, currentUserId, isString(roomName) ? roomName : undefined)
-        socket.join(roomId)
-        socket.data.admitted = true
-
-        let role: RoomRole = 'viewer'
-        if (currentUserId) {
-          role = 'owner'
-          setRole(socket, role)
-          trackUserSocket(roomId, currentUserId, socket)
+        const created = dbCreateRoomWithOwner(roomId, currentUserId, isString(roomName) ? roomName : undefined)
+        if (created) {
+          admitUser(roomId, attempt)
+          log.info(`[ROOM] Room created — user = ${currentUser} | email = ${maskEmail(currentUserEmail)} | role = owner | room = ${roomId}`)
+          return
         }
-
-        const participant = addParticipant(roomId, socket.id, currentUser, currentUserId ?? undefined, role, currentAvatar)
-        const room = getOrCreateRoom(roomId)
-        const roomRow = dbGetRoom(roomId)
-
-        socket.emit('room-state', {
-          files: getRoomFiles(roomId),
-          participants: [],
-          roomName: roomRow?.name ?? null,
-          role,
-          chatHistory: dbGetChatMessages(roomId),
-          hasPassword: false,
-        })
-
-        log.info(`[ROOM] Room created — user = ${currentUser} | email = ${maskEmail(currentUserEmail)} | role = ${role} | room = ${roomId}`)
-        return
+        // isNew is only a client hint. For an existing room, enforce the same
+        // membership, password and approval checks as every other join below.
       }
 
       const roomRow = dbGetRoom(roomId)
@@ -228,7 +342,7 @@ export function registerSocketHandlers(io: Server) {
         if (existingRole) {
           if (existingRole === 'owner') {
             // Owner always gets in — they set the password
-            admitUser(roomId, socket, currentUserId, currentUser, currentUserEmail, currentAvatar, roomRow)
+            admitUser(roomId, attempt)
             return
           }
           // Editor / viewer: must enter password if room is locked
@@ -238,12 +352,13 @@ export function registerSocketHandlers(io: Server) {
               return
             }
             const valid = await bcrypt.compare(password, roomRow.password_hash)
+            if (!isCurrentAttempt(attempt)) return
             if (!valid) {
               socket.emit('room-wrong-password')
               return
             }
           }
-          admitUser(roomId, socket, currentUserId, currentUser, currentUserEmail, currentAvatar, roomRow)
+          admitUser(roomId, attempt)
           return
         }
       }
@@ -260,13 +375,14 @@ export function registerSocketHandlers(io: Server) {
           return
         }
         const valid = await bcrypt.compare(password, roomRow.password_hash)
+        if (!isCurrentAttempt(attempt)) return
         if (!valid) {
           socket.emit('room-wrong-password')
           return
         }
         // Correct password — admit authenticated user as viewer
         log.info(`[ROOM] Password correct — user = ${currentUser} | room = ${roomId}`)
-        admitUser(roomId, socket, currentUserId, currentUser, currentUserEmail, currentAvatar, roomRow)
+        admitUser(roomId, attempt)
         return
       }
 
@@ -279,14 +395,20 @@ export function registerSocketHandlers(io: Server) {
         return
       }
 
-      const knockTimeoutId = setTimeout(() => {
-        if (pendingKnocks.has(socket.id)) {
-          pendingKnocks.delete(socket.id)
-          socket.emit('knock-denied')
-          log.info(`[ROOM] Knock expired — user = ${currentUser} | room = ${roomId}`)
-        }
-      }, 60_000)
-      pendingKnocks.set(socket.id, { userId: currentUserId, userName: currentUser, roomId, timeoutId: knockTimeoutId })
+      const denyPendingKnock = () => {
+        if (pendingKnocks.get(socket.id) !== knock) return
+        cancelPendingKnock(socket.id)
+        socket.emit('knock-denied')
+        log.info(`[ROOM] Knock expired — user = ${knock.userName} | room = ${roomId}`)
+      }
+      const knock: PendingKnock = {
+        userId: currentUserId,
+        userName: currentUser,
+        roomId,
+        timeoutId: setTimeout(denyPendingKnock, 60_000),
+        admit: () => admitUser(roomId, attempt),
+      }
+      pendingKnocks.set(socket.id, knock)
       log.info(`[ROOM] Knock received — user = ${currentUser} | email = ${maskEmail(currentUserEmail)} | room = ${roomId}`)
 
       const room = getOrCreateRoom(roomId)
@@ -304,11 +426,8 @@ export function registerSocketHandlers(io: Server) {
       if (!notified) {
         // Random delay to prevent timing-based detection of owner presence.
         const delay = 1000 + Math.random() * 2000
-        setTimeout(() => {
-          clearTimeout(knockTimeoutId)
-          pendingKnocks.delete(socket.id)
-          socket.emit('knock-denied')
-        }, delay)
+        clearTimeout(knock.timeoutId)
+        knock.timeoutId = setTimeout(denyPendingKnock, delay)
         log.info(`[ROOM] Knock auto-denied (no owner online) — user = ${currentUser} | room = ${roomId}`)
       } else {
         socket.emit('knock-pending')
@@ -316,36 +435,33 @@ export function registerSocketHandlers(io: Server) {
     })
 
     // Owner approves a knock
-    safeOn(socket, 'approve-knock', ({ knockId }: { knockId: string }) => {
+    onClientEvent('approve-knock', ({ knockId }: { knockId: string }) => {
       if (!checkRateLimit(socket, 'approve-knock')) return
       if (!isValidId(knockId)) return
-      if (!currentRoom) return
+      if (!currentRoom || !socket.data.admitted) return
       if (getRole(socket) !== 'owner') return
 
       const knock = pendingKnocks.get(knockId)
       if (!knock || knock.roomId !== currentRoom) return
-      clearTimeout(knock.timeoutId)
-      pendingKnocks.delete(knockId)
+      cancelPendingKnock(knockId)
 
       const knockerSocket = io.sockets.sockets.get(knockId)
       if (!knockerSocket) return
 
       log.info(`[ROOM] Knock approved — user = ${knock.userName} | by = ${currentUser} | room = ${currentRoom}`)
-      const knockerAvatar = knock.userId ? (dbGetUserById(knock.userId)?.avatar ?? null) : null
-      admitUser(currentRoom, knockerSocket, knock.userId, knock.userName, '(approved)', knockerAvatar)
+      knock.admit()
     })
 
     // Owner denies a knock
-    safeOn(socket, 'deny-knock', ({ knockId }: { knockId: string }) => {
+    onClientEvent('deny-knock', ({ knockId }: { knockId: string }) => {
       if (!checkRateLimit(socket, 'deny-knock')) return
       if (!isValidId(knockId)) return
-      if (!currentRoom) return
+      if (!currentRoom || !socket.data.admitted) return
       if (getRole(socket) !== 'owner') return
 
       const knock = pendingKnocks.get(knockId)
       if (!knock || knock.roomId !== currentRoom) return
-      clearTimeout(knock.timeoutId)
-      pendingKnocks.delete(knockId)
+      cancelPendingKnock(knockId)
 
       const knockerSocket = io.sockets.sockets.get(knockId)
       if (knockerSocket) {
@@ -354,7 +470,7 @@ export function registerSocketHandlers(io: Server) {
       log.info(`[ROOM] Knock denied — user = ${knock.userName} | by = ${currentUser} | room = ${currentRoom}`)
     })
 
-    safeOn(socket, 'code-change', ({ fileId, content }: { fileId: string; content: string }) => {
+    onClientEvent('code-change', ({ fileId, content }: { fileId: string; content: string }) => {
       if (!checkRateLimit(socket, 'code-change')) return
       if (!isValidId(fileId)) return
       if (!isBoundedString(content, LIMITS.FILE_CONTENT)) return
@@ -368,7 +484,7 @@ export function registerSocketHandlers(io: Server) {
       io.to(currentRoom).emit('code-update', { fileId, content, fromSocketId: socket.id })
     })
 
-    safeOn(socket, 'code-patch', ({ fileId, start, deleteCount, insert }: { fileId: string; start: number; deleteCount: number; insert: string }) => {
+    onClientEvent('code-patch', ({ fileId, start, deleteCount, insert }: { fileId: string; start: number; deleteCount: number; insert: string }) => {
       if (!checkRateLimit(socket, 'code-patch')) return
       if (!isValidId(fileId)) return
       if (!isNonNegativeInt(start, LIMITS.FILE_CONTENT)) return
@@ -385,7 +501,7 @@ export function registerSocketHandlers(io: Server) {
       io.to(currentRoom).emit('code-update', { fileId, content: updated, fromSocketId: socket.id })
     })
 
-    safeOn(socket, 'cursor-move', ({ fileId, line, column }: { fileId: string; line: number; column: number }) => {
+    onClientEvent('cursor-move', ({ fileId, line, column }: { fileId: string; line: number; column: number }) => {
       if (!checkRateLimit(socket, 'cursor-move')) return
       if (!isValidId(fileId)) return
       if (!isNonNegativeInt(line, LIMITS.CURSOR_POS)) return
@@ -399,7 +515,7 @@ export function registerSocketHandlers(io: Server) {
       })
     })
 
-    safeOn(socket, 'create-file', ({ parentId, name, type, content }: { parentId: string | null; name: string; type: 'file' | 'folder'; content?: string }, callback?: (node: ReturnType<typeof createFile>) => void) => {
+    onClientEvent('create-file', ({ parentId, name, type, content }: { parentId: string | null; name: string; type: 'file' | 'folder'; content?: string }, callback?: (node: ReturnType<typeof createFile>) => void) => {
       const reject = () => { if (typeof callback === 'function') callback(undefined as unknown as ReturnType<typeof createFile>) }
       if (!checkRateLimit(socket, 'create-file')) { reject(); return }
       if (parentId !== null && !isValidId(parentId)) { reject(); return }
@@ -414,7 +530,7 @@ export function registerSocketHandlers(io: Server) {
       io.to(currentRoom).emit('file-created', { node, parentId: node.parentId })
     })
 
-    safeOn(socket, 'import-zip', (
+    onClientEvent('import-zip', (
       { entries }: { entries: { tempId: string; parentTempId: string | null; name: string; type: 'file' | 'folder'; content?: string }[] },
       callback?: (idMap: Record<string, string>) => void,
     ) => {
@@ -454,7 +570,7 @@ export function registerSocketHandlers(io: Server) {
       if (typeof callback === 'function') callback(idMap)
     })
 
-    safeOn(socket, 'rename-room', ({ name }: { name: string }) => {
+    onClientEvent('rename-room', ({ name }: { name: string }) => {
       if (!checkRateLimit(socket, 'rename-room')) return
       if (!isString(name)) return
       if (!currentRoom || !socket.data.admitted) return
@@ -464,7 +580,7 @@ export function registerSocketHandlers(io: Server) {
       log.info(`[ROOM] Room renamed — name = ${savedName} | user = ${currentUser} | email = ${maskEmail(currentUserEmail)} | room = ${currentRoom}`)
     })
 
-    safeOn(socket, 'delete-file', ({ fileId }: { fileId: string }) => {
+    onClientEvent('delete-file', ({ fileId }: { fileId: string }) => {
       if (!checkRateLimit(socket, 'delete-file')) return
       if (!isValidId(fileId)) return
       if (!currentRoom || !socket.data.admitted) return
@@ -477,7 +593,7 @@ export function registerSocketHandlers(io: Server) {
       log.info(`[ROOM] File deleted — file = ${fileId} | user = ${currentUser} | email = ${maskEmail(currentUserEmail)} | room = ${currentRoom}`)
     })
 
-    safeOn(socket, 'run-code', async ({ language, code, stdin }: { language: string; code: string; stdin?: string }) => {
+    onClientEvent('run-code', async ({ language, code, stdin }: { language: string; code: string; stdin?: string }) => {
       if (!checkRateLimit(socket, 'run-code')) return
       if (!isString(language)) return
       if (!isBoundedString(code, LIMITS.RUN_CODE)) return
@@ -496,7 +612,7 @@ export function registerSocketHandlers(io: Server) {
       })
     })
 
-    safeOn(socket, 'format-code', async ({ language, code }: { language: string; code: string }) => {
+    onClientEvent('format-code', async ({ language, code }: { language: string; code: string }) => {
       if (!checkRateLimit(socket, 'format-code')) return
       if (!isString(language)) return
       if (!isBoundedString(code, LIMITS.RUN_CODE)) return
@@ -508,7 +624,7 @@ export function registerSocketHandlers(io: Server) {
     })
 
     // Owner-only: change a member's role
-    safeOn(socket, 'set-member-role', ({ userId, role }: { userId: string; role: RoomRole }) => {
+    onClientEvent('set-member-role', ({ userId, role }: { userId: string; role: RoomRole }) => {
       if (!checkRateLimit(socket, 'set-member-role')) return
       if (!isValidId(userId)) return
       if (!currentRoom || !currentUserId || !socket.data.admitted) return
@@ -533,16 +649,11 @@ export function registerSocketHandlers(io: Server) {
       dbSetMemberRole(userId, currentRoom, role)
       log.info(`[ROOM] Role changed — target = ${userId} | role = ${role} | by = ${currentUser} | room = ${currentRoom}`)
  
-      io.to(currentRoom).emit('member-role-changed', { userId, role })
-
-      for (const targetSocket of getUserSockets(currentRoom, userId)) {
-        setRole(targetSocket, role)
-        targetSocket.emit('role-refreshed', { role })
-      }
+      notifyMemberRoleChanged(currentRoom, userId, role)
     })
 
     // Owner-only: kick a member from the room
-    safeOn(socket, 'kick-member', ({ userId }: { userId: string }) => {
+    onClientEvent('kick-member', ({ userId }: { userId: string }) => {
       if (!checkRateLimit(socket, 'kick-member')) return
       if (!isValidId(userId)) return
       if (!currentRoom || !currentUserId || !socket.data.admitted) return
@@ -561,14 +672,10 @@ export function registerSocketHandlers(io: Server) {
       }
       dbRemoveMember(userId, currentRoom)
       log.info(`[ROOM] Member kicked — target = ${userId} | by = ${currentUser} | room = ${currentRoom}`)
-      io.to(currentRoom).emit('member-kicked', { userId })
-
-      for (const targetSocket of getUserSockets(currentRoom, userId)) {
-        targetSocket.disconnect(true)
-      }
+      notifyMemberRemoved(currentRoom, userId)
     })
 
-    safeOn(socket, 'rename-file', ({ fileId, name }: { fileId: string; name: string }) => {
+    onClientEvent('rename-file', ({ fileId, name }: { fileId: string; name: string }) => {
       if (!checkRateLimit(socket, 'rename-file')) return
       if (!isValidId(fileId)) return
       if (!isValidFileName(name)) return
@@ -584,7 +691,7 @@ export function registerSocketHandlers(io: Server) {
       io.to(currentRoom).emit('file-renamed', { fileId, name: trimmed })
     })
 
-    safeOn(socket, 'move-file', ({ fileId, parentId }: { fileId: string; parentId: string }) => {
+    onClientEvent('move-file', ({ fileId, parentId }: { fileId: string; parentId: string }) => {
       if (!checkRateLimit(socket, 'move-file')) return
       if (!isValidId(fileId)) return
       if (!isValidId(parentId)) return
@@ -598,7 +705,7 @@ export function registerSocketHandlers(io: Server) {
       io.to(currentRoom).emit('file-moved', { fileId, parentId })
     })
 
-    safeOn(socket, 'chat-send', ({ content }: { content: string }) => {
+    onClientEvent('chat-send', ({ content }: { content: string }) => {
       if (!checkRateLimit(socket, 'chat-send')) return
       if (!currentRoom || !socket.data.admitted) return
       if (typeof content !== 'string') return
@@ -609,26 +716,14 @@ export function registerSocketHandlers(io: Server) {
     })
 
     safeOn(socket, 'disconnect', () => {
-      const ownKnock = pendingKnocks.get(socket.id)
-      if (ownKnock) { clearTimeout(ownKnock.timeoutId); pendingKnocks.delete(socket.id) }
+      ++joinAttempt
+      clearTimeout(sessionExpiryTimer)
+      connectionAccess.delete(socket)
+      cancelPendingKnock(socket.id)
+      leaveCurrentRoom()
       delete socket.data.__rateBuckets
       delete socket.data.__abuseBudget
-      if (!currentRoom || !socket.data.admitted) return
-      if (currentUserId) untrackUserSocket(currentRoom, currentUserId, socket)
-      const wasOwner = getRole(socket) === 'owner'
-      removeParticipant(currentRoom, socket.id)
-
-      if (wasOwner && !hasOnlineOwner(currentRoom)) {
-        for (const [knockId, knock] of pendingKnocks.entries()) {
-          if (knock.roomId === currentRoom) {
-            clearTimeout(knock.timeoutId)
-            io.sockets.sockets.get(knockId)?.emit('knock-denied')
-            pendingKnocks.delete(knockId)
-          }
-        }
-      }
-      socket.to(currentRoom).emit('participant-left', { id: socket.id })
-      log.info(`[ROOM] User left — user = ${currentUser} | email = ${maskEmail(currentUserEmail)} | room = ${currentRoom}`)
     })
+    if (session) armSessionExpiry(session.expiresAt)
   })
 }

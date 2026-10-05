@@ -519,8 +519,12 @@ export function dbCreateRoom(roomId: string, userId?: string, name?: string) {
 }
 
 export const dbCreateRoomWithOwner = db.transaction((roomId: string, userId: string, name?: string) => {
-  stmtInsertRoom.run(roomId, userId, name?.trim().slice(0, 60) || null)
+  const inserted = stmtInsertRoom.run(roomId, userId, name?.trim().slice(0, 60) || null)
+  // A conflicting ID belongs to an existing room. Never add an owner unless
+  // this transaction actually inserted the room, even on concurrent requests.
+  if (inserted.changes === 0) return false
   stmtUpsertRoomMember.run(userId, roomId, 'owner')
+  return true
 })
 
 /* ------------------------------------------------------------------ */
