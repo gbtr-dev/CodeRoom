@@ -80,31 +80,56 @@ app.register(async (instance) => {
 
 app.get('/health', async () => ({ status: 'ok' }))
 
+let io: Server | undefined
 let isShuttingDown = false
 
 async function shutdown(signal: string) {
   if (isShuttingDown) return
   isShuttingDown = true
 
-  // Safety net: force-exit after 5 s if something hangs
+  log.info(`Ricevuto ${signal}, chiusura server…`)
+
+  // 1. Salva SUBITO il contenuto in RAM: da qui in poi, anche se qualcosa si blocca,
+  //    i dati sono già sul DB.
+  try {
+    flushAllRoomContent()
+    log.info('Flush contenuti su DB completato')
+  } catch (err) {
+    log.error('Errore durante il flush iniziale', { error: String(err) })
+  }
+
+  // Safety net: se la chiusura si blocca, fai un ultimo flush ed esci.
   const timer = setTimeout(() => {
     log.error('Shutdown timeout — uscita forzata')
+    try { flushAllRoomContent() } catch { /* ignora */ }
     process.exit(1)
-  }, 5_000).unref()
+  }, 8_000).unref()
 
-  log.info(`Ricevuto ${signal}, chiusura server…`)
   try {
-    // Stop accepting new connections and wait for in-flight requests to finish
+    // 2. Chiude Socket.IO: disconnette i WebSocket (che altrimenti tengono vivo
+    //    l'http server per sempre) e smette di accettare nuove connessioni.
+    //    Gli handler di 'disconnect' fanno a loro volta flush delle stanze.
+    if (io) await io.close()
+  } catch (err) {
+    log.error('Errore durante la chiusura di Socket.IO', { error: String(err) })
+  }
+
+  try {
+    // 3. Chiude Fastify (richieste HTTP in corso, hook onClose, ecc.)
     await app.close()
   } catch (err) {
     log.error('Errore durante la chiusura del server', { error: String(err) })
   }
 
-  log.info('Flush contenuti su DB…')
-  flushAllRoomContent()
-  await shutdownPool()
-  log.info('Flush completato, uscita.')
+  // 4. Ultimo flush: cattura eventuali modifiche arrivate durante la chiusura.
+  try {
+    flushAllRoomContent()
+    await shutdownPool()
+  } catch (err) {
+    log.error('Errore nel flush finale', { error: String(err) })
+  }
 
+  log.info('Chiusura completata, uscita.')
   clearTimeout(timer)
   process.exit(0)
 }
@@ -116,7 +141,7 @@ process.on('SIGTERM', () => shutdown('SIGTERM'))
 app.listen({ port: 45032, host: '0.0.0.0' }, (err) => {
   if (err) { log.error('Errore avvio server', { error: String(err) }); process.exit(1) }
 
-  const io = new Server(app.server, {
+  io = new Server(app.server, {
     cors: {
       origin: CORS_ORIGIN,
       methods: ['GET', 'POST'],
