@@ -581,6 +581,24 @@ export function dbUpdateUserPassword(id: string, passwordHash: string) {
   })()
 }
 
+// Call only inside the transaction that performs the sensitive write: bcrypt
+// checks happen asynchronously and their session/credential snapshot can go stale.
+function hasCurrentCredentials(userId: string, sessionToken: string, expectedPasswordHash: string): boolean {
+  const session = dbGetSession(sessionToken)
+  return !!session && session.user_id === userId &&
+    session.expires_at > Math.floor(Date.now() / 1000) &&
+    !!stmtPasswordMatches.get(userId, expectedPasswordHash)
+}
+
+export function dbChangePasswordForSession(userId: string, sessionToken: string, expectedPasswordHash: string, passwordHash: string): boolean {
+  return db.transaction(() => {
+    if (!hasCurrentCredentials(userId, sessionToken, expectedPasswordHash)) return false
+    dbUpdateUserPassword(userId, passwordHash)
+    stmtDeleteOtherSessions.run(userId, hashSessionToken(sessionToken))
+    return true
+  }).immediate()
+}
+
 /* ------------------------------------------------------------------ */
 /* Email verification                                                  */
 /* ------------------------------------------------------------------ */
@@ -722,6 +740,16 @@ export function dbDeleteUser(id: string) {
     stmtDeleteUserById.run(userId)
   })
   tx(id)
+}
+
+/** Null means authorization became stale; notifications must follow a successful commit. */
+export function dbDeleteUserForSession(userId: string, sessionToken: string, expectedPasswordHash: string): string[] | null {
+  return db.transaction(() => {
+    if (!hasCurrentCredentials(userId, sessionToken, expectedPasswordHash)) return null
+    const ownedRooms = dbGetOwnedRooms(userId)
+    dbDeleteUser(userId)
+    return ownedRooms
+  }).immediate()
 }
 
 /* ------------------------------------------------------------------ */

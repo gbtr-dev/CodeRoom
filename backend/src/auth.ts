@@ -13,9 +13,8 @@ import {
   dbIsRoomMember,
   dbDeleteRoom,
   dbUpdateUserName,
-  dbUpdateUserPassword,
-  dbDeleteUser,
-  dbGetOwnedRooms,
+  dbChangePasswordForSession,
+  dbDeleteUserForSession,
   dbGetMemberRole,
   dbSetRoomPassword,
   dbClearRoomPassword,
@@ -606,16 +605,18 @@ export async function registerAuthRoutes(app: FastifyInstance) {
       if (!valid) return reply.status(401).send({ error: 'Incorrect current password' })
 
       const hash = await bcrypt.hash(newPassword, 10)
-      dbUpdateUserPassword(req.userId, hash)
+      if (!dbChangePasswordForSession(req.userId, req.sessionToken, userFull.password_hash, hash)) {
+        return reply.status(401).send({ error: 'Session or credentials changed. Please sign in again.' })
+      }
 
-      destroyOtherSessions(req.userId, req.sessionToken)
+      disconnectRevokedUserSockets(req.userId)
       log.info('User password updated', { userId: req.userId })
       return reply.send({ success: true })
     })
 
     // Delete account
     protectedRoutes.delete('/auth/me', async (req, reply) => {
-      const { password } = req.body as { password: string }
+      const password = readString(((req.body ?? {}) as Record<string, unknown>).password)
       if (!password) return reply.status(400).send({ error: 'Password is required' })
 
       const user = dbGetUserById(req.userId)
@@ -626,11 +627,13 @@ export async function registerAuthRoutes(app: FastifyInstance) {
       const valid = await comparePassword(password, userFull.password_hash)
       if (!valid) return reply.status(401).send({ error: 'Incorrect password' })
 
-      // Notify users in owned rooms before deleting data
-      const ownedRooms = dbGetOwnedRooms(req.userId)
+      const ownedRooms = dbDeleteUserForSession(req.userId, req.sessionToken, userFull.password_hash)
+      if (ownedRooms === null) {
+        return reply.status(401).send({ error: 'Session or credentials changed. Please sign in again.' })
+      }
+      // Notify only after the guarded deletion commits successfully.
       disconnectAllUserSockets(req.userId)
       for (const roomId of ownedRooms) notifyRoomDeleted(roomId)
-      dbDeleteUser(req.userId)
       reply.clearCookie(SESSION_COOKIE_NAME, { path: '/' })
       log.info('User account deleted', { userId: req.userId })
       return reply.send({ success: true })

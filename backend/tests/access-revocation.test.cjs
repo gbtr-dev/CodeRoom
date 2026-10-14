@@ -451,3 +451,19 @@ test('account deletion revokes every session, including sockets not yet admitted
   assert.equal(db.dbGetUserById(member.id), undefined)
   assert.equal(db.dbRoomExists(roomId), false)
 })
+
+test('failed account deletion preserves live sockets and room access', async (t) => {
+  const member = user()
+  const roomId = room(member)
+  const active = await clientFor(t, member)
+  await join(active, roomId)
+  const socket = io.sockets.sockets.get(active.id)
+  db.default.exec(`CREATE TEMP TRIGGER fail_account_delete BEFORE DELETE ON users
+    BEGIN SELECT RAISE(ABORT, 'simulated account deletion failure'); END`)
+  t.after(() => db.default.exec('DROP TRIGGER fail_account_delete'))
+  assert.equal((await request(member, 'DELETE', '/auth/me', { password: 'old-password' })).statusCode, 500)
+  assert.equal(socket.connected, true)
+  assert.equal(socket.rooms.has(roomId), true)
+  assert.ok(db.dbGetUserById(member.id))
+  assert.ok(db.dbRoomExists(roomId))
+})
