@@ -246,6 +246,7 @@ function PasswordField({ value, onChange, showPw, onToggleShow, autoComplete }: 
 /* ------------------------------------------------------------------ */
 type PendingState = {
   email: string
+  resendToken?: string
   /** where the user came from: a fresh signup, or a sign-in attempt on an unconfirmed account */
   from: "signup" | "login"
 }
@@ -254,7 +255,7 @@ const RESEND_COOLDOWN_SECONDS = 60
 
 function CheckInbox({ pending, onResend, onBack, onSignIn }: {
   pending: PendingState
-  onResend: (email: string) => Promise<{ error?: string }>
+  onResend: (email: string, resendToken?: string) => Promise<{ error?: string }>
   onBack: () => void
   onSignIn: () => void
 }) {
@@ -276,7 +277,7 @@ function CheckInbox({ pending, onResend, onBack, onSignIn }: {
     setSending(true)
     setError(null)
     setNotice(null)
-    const result = await onResend(email)
+    const result = await onResend(email, pending.resendToken)
     setSending(false)
     if (result.error) { setError(result.error); return }
     // Same message whether or not the address exists: the server does not reveal it either

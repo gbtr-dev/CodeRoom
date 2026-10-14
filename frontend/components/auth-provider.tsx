@@ -16,6 +16,7 @@ export type User = {
 /** Neutral signup acknowledgement; does not disclose account or delivery status. */
 export type PendingVerification = {
   email: string
+  resendToken: string
 }
 
 export type VerifyEmailResult =
@@ -30,7 +31,7 @@ type AuthContextValue = {
   logout: () => void
   updateUser: (u: User) => void
   verifyEmail: (token: string) => Promise<VerifyEmailResult>
-  resendVerification: (email: string) => Promise<{ error?: string }>
+  resendVerification: (email: string, resendToken?: string) => Promise<{ error?: string }>
 }
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:45032"
@@ -87,7 +88,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (!res.ok) return { error: data.error ?? "Signup failed" }
       // The account must be confirmed by email before it can be used: there is no session yet
       if (data.status === "verification_required") {
-        return { pending: { email: data.email } }
+        return { pending: { email: data.email, resendToken: data.resendToken } }
       }
       // Older backend (no email confirmation): the user is signed in right away
       setUser({ ...data.user, avatar: sanitizeAvatar(data.user.avatar) })
@@ -135,13 +136,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }
 
-  async function resendVerification(email: string): Promise<{ error?: string }> {
+  async function resendVerification(email: string, resendToken?: string): Promise<{ error?: string }> {
     try {
       const res = await fetch(`${BACKEND_URL}/auth/resend-verification`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ email }),
+        body: JSON.stringify({ email, resendToken }),
       })
       if (res.status === 429) return { error: "Too many attempts. Please wait a minute and try again." }
       const data = await res.json().catch(() => ({}))

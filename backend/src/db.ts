@@ -123,6 +123,19 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_email_verifications_user ON email_verifications(user_id);
   CREATE INDEX IF NOT EXISTS idx_email_verifications_email ON email_verifications(email, created_at);
   CREATE INDEX IF NOT EXISTS idx_email_verifications_created ON email_verifications(created_at);
+
+  -- A browser can resend only its own signup request. This is separate from
+  -- email tokens so a throttled or failed first delivery can still be retried.
+  CREATE TABLE IF NOT EXISTS signup_requests (
+    token_hash TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    email TEXT NOT NULL,
+    name TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_signup_requests_user ON signup_requests(user_id);
+  CREATE INDEX IF NOT EXISTS idx_signup_requests_expiry ON signup_requests(expires_at);
 `)
 
 function hashSessionToken(token: string): string {
@@ -574,6 +587,27 @@ export function dbUpdateUserPassword(id: string, passwordHash: string) {
 
 export type EmailVerificationPurpose = 'signup' | 'change'
 
+export function dbCreateSignupRequest(tokenHash: string, userId: string, email: string, name: string, passwordHash: string, expiresAt: number) {
+  db.transaction(() => {
+    db.prepare('INSERT INTO signup_requests (token_hash, user_id, email, name, password_hash, expires_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(tokenHash, userId, email, name, passwordHash, expiresAt)
+    db.prepare('UPDATE users SET created_at = MAX(created_at, unixepoch()) WHERE id = ?').run(userId)
+  })()
+}
+
+export function dbGetSignupRequest(tokenHash: string, email: string) {
+  return db.prepare(`
+    SELECT r.user_id, r.name, r.password_hash FROM signup_requests r
+    JOIN users u ON u.id = r.user_id
+    WHERE r.token_hash = ? AND r.email = ? AND u.email = r.email
+      AND r.expires_at > unixepoch() AND u.email_verified_at IS NULL
+  `).get(tokenHash, email) as { user_id: string; name: string; password_hash: string } | undefined
+}
+
+export function dbDeleteExpiredSignupRequests(nowSec: number) {
+  db.prepare('DELETE FROM signup_requests WHERE expires_at <= ?').run(nowSec)
+}
+
 export type EmailVerificationResult =
   | { status: 'ok'; userId: string; email: string; purpose: EmailVerificationPurpose }
   | { status: 'invalid' | 'expired' | 'conflict' }
@@ -637,6 +671,7 @@ export function dbConsumeEmailVerification(tokenHash: string): EmailVerification
     stmtMarkUserVerified.run(now, row.user_id)
     stmtMarkEmailVerificationUsed.run(now, hash)
     stmtClosePendingVerifications.run(now, row.user_id)
+    db.prepare('DELETE FROM signup_requests WHERE user_id = ?').run(row.user_id)
     return { status: 'ok', userId: row.user_id, email: row.email, purpose: row.purpose }
   })
   return tx.immediate(tokenHash)

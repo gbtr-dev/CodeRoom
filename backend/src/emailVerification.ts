@@ -4,6 +4,7 @@ import {
   dbCreateEmailVerification,
   dbDeleteOldEmailVerifications,
   dbDeleteStaleUnverifiedUsers,
+  dbDeleteExpiredSignupRequests,
   dbGetEmailVerificationStats,
   type EmailVerificationPurpose,
 } from './db'
@@ -120,6 +121,7 @@ export async function sendVerificationEmail(params: {
 /* ------------------------------------------------------------------ */
 
 export function runEmailVerificationCleanup(nowSec: number = Math.floor(Date.now() / 1000)): { users: number; tokens: number } {
+  dbDeleteExpiredSignupRequests(nowSec)
   const users = dbDeleteStaleUnverifiedUsers(nowSec - UNVERIFIED_ACCOUNT_TTL_SECONDS)
   const tokens = dbDeleteOldEmailVerifications(nowSec - 2 * 24 * 60 * 60)
   if (users > 0 || tokens > 0) {

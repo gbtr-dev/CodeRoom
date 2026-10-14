@@ -33,6 +33,8 @@ import {
   dbGetInvite,
   dbAcceptInvite,
   dbConsumeEmailVerification,
+  dbCreateSignupRequest,
+  dbGetSignupRequest,
   dbDeleteSessionsByUser,
   type RoomRole,
 } from './db'
@@ -40,7 +42,7 @@ import { notifyRoomDeleted, notifyUserLeftRoom, notifyMemberRoleChanged, notifyM
 import { createLogger, maskEmail } from './logger'
 import { checkLoginLock, recordLoginFailure, recordLoginSuccess } from './authRateLimiter'
 import { isValidEmail } from './validation'
-import { hashVerificationToken, sendVerificationEmail } from './emailVerification'
+import { hashVerificationToken, sendVerificationEmail, VERIFICATION_TTL_SECONDS } from './emailVerification'
 
 const log = createLogger('AUTH')
 // Same bcrypt cost as signup; generated once, never used for an actual account.
@@ -209,10 +211,17 @@ export async function registerAuthRoutes(app: FastifyInstance) {
       log.info('Signup successful — waiting for email confirmation', { userId, name: trimmedName, email: maskEmail(normalizedEmail) })
     }
 
+    // This capability authorizes resending this credential snapshot, not confirming it.
+    // Never use the account placeholder or another browser's latest request for resends.
+    const resendToken = randomBytes(32).toString('base64url')
+    dbCreateSignupRequest(hashVerificationToken(resendToken), userId, normalizedEmail, trimmedName, passwordHash,
+      Math.floor(Date.now() / 1000) + VERIFICATION_TTL_SECONDS)
+    reply.header('Cache-Control', 'no-store')
+
     // Provider latency and delivery status must not reveal account existence.
     void sendVerificationEmail({ userId, name: trimmedName, email: normalizedEmail, purpose: 'signup', signupCredentials: { name: trimmedName, passwordHash } })
       .catch((err) => log.error('Signup verification failed', { error: String(err) }))
-    return reply.send({ status: 'verification_required', email: normalizedEmail })
+    return reply.send({ status: 'verification_required', email: normalizedEmail, resendToken })
   })
 
   // Login
@@ -297,8 +306,8 @@ export async function registerAuthRoutes(app: FastifyInstance) {
     }
   })
 
-  // Sends the confirmation email again. The answer is always the same, so it cannot be used to find
-  // out which addresses are registered; the sending limits are applied inside sendVerificationEmail.
+  // Resend only the signup snapshot identified by the browser's capability.
+  // Invalid capabilities receive the same error regardless of account existence.
   app.post('/auth/resend-verification', {
     config: {
       rateLimit: {
@@ -307,17 +316,24 @@ export async function registerAuthRoutes(app: FastifyInstance) {
       },
     },
   }, async (req, reply) => {
-    const email = readString(((req.body ?? {}) as Record<string, unknown>).email)
+    const body = (req.body ?? {}) as Record<string, unknown>
+    const email = readString(body.email)
     if (!email || !isValidEmail(email)) {
       return reply.status(400).send({ error: 'Please enter a valid email address' })
     }
 
-    const user = dbGetUserByEmail(email.toLowerCase().trim())
-    if (user && !user.email_verified_at) {
-      // Not awaited, so the response time does not reveal whether an email was sent
-      sendVerificationEmail({ userId: user.id, name: user.name, email: user.email, purpose: 'signup' })
-        .catch((err) => log.error('Reinvio verifica fallito', { error: String(err) }))
+    const resendToken = readString(body.resendToken)
+    const normalizedEmail = email.toLowerCase().trim()
+    const pending = resendToken && /^[A-Za-z0-9_-]{43}$/.test(resendToken)
+      ? dbGetSignupRequest(hashVerificationToken(resendToken), normalizedEmail)
+      : undefined
+    if (!pending) {
+      return reply.status(400).send({ error: 'This registration request is missing or has expired. Please submit the signup form again, or sign in if you already confirmed your email.' })
     }
+    // Sending still uses the normal cooldown and hourly/daily limits.
+    void sendVerificationEmail({ userId: pending.user_id, name: pending.name, email: normalizedEmail,
+      purpose: 'signup', signupCredentials: { name: pending.name, passwordHash: pending.password_hash } })
+      .catch((err) => log.error('Reinvio verifica fallito', { error: String(err) }))
     return reply.send({ status: 'ok' })
   })
 

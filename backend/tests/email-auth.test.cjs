@@ -56,6 +56,13 @@ const put = (url, payload, cookieValue) =>
 const get = (url, cookieValue) => app.inject({ method: 'GET', url, headers: { cookie: cookieValue } })
 const tokenFrom = (message) => new URL(message.text.match(/https?:\/\/\S+/)[0]).searchParams.get('token')
 const sessionCookie = (res) => res.cookies.find((c) => c.name === SESSION_COOKIE_NAME)
+function assertSignupResponse(res, email) {
+  const { resendToken, ...body } = res.json()
+  assert.deepEqual(body, { status: 'verification_required', email })
+  assert.match(resendToken, /^[A-Za-z0-9_-]{43}$/)
+  assert.equal(res.headers['cache-control'], 'no-store')
+  return resendToken
+}
 // lets the cooldown pass without waiting a real minute
 const ageEmails = (seconds = 120) => db.default.prepare('UPDATE email_verifications SET created_at = created_at - ?').run(seconds)
 const sessionCount = (userId) => db.default.prepare('SELECT COUNT(*) AS n FROM sessions WHERE user_id = ?').get(userId).n
@@ -199,7 +206,7 @@ test('signup: creates an unverified account, sends one email and creates NO sess
   const res = await post('/auth/signup', { name: 'Anna', email, password: 'secret123' })
 
   assert.equal(res.statusCode, 200)
-  assert.deepEqual(res.json(), { status: 'verification_required', email })
+  assertSignupResponse(res, email)
   assert.equal(res.headers['set-cookie'], undefined)
   assert.equal(res.json().user, undefined)
 
@@ -308,7 +315,7 @@ test('signup right after another one: account saved, email held back by the cool
   const second = await post('/auth/signup', { name: 'Intruder', email, password: 'intruder-pass' })
 
   assert.equal(second.statusCode, 200)
-  assert.deepEqual(second.json(), { status: 'verification_required', email })
+  assertSignupResponse(second, email)
   assert.equal(sent.length, 1)
   const oldLink = await post('/auth/verify-email', { token: tokenFrom(sent[0]) })
   assert.equal(oldLink.statusCode, 200)
@@ -322,7 +329,7 @@ test('signup: provider failure keeps the account and returns a neutral response'
   const email = uniqueEmail('provider')
   const res = await post('/auth/signup', { name: 'P', email, password: 'secret123' })
   assert.equal(res.statusCode, 200)
-  assert.deepEqual(res.json(), { status: 'verification_required', email })
+  assertSignupResponse(res, email)
   assert.ok(db.dbGetUserByEmail(email))
 })
 
@@ -337,7 +344,7 @@ test('signup/login: malformed bodies are a 400, never a 500', async () => {
   }
 })
 
-test('resend: same answer for unknown, unconfirmed and confirmed addresses; sends only when it makes sense', async () => {
+test('resend: email alone never sends mail or reveals whether an account exists', async () => {
   const unconfirmed = uniqueEmail('resend-un')
   await post('/auth/signup', { name: 'U', email: unconfirmed, password: 'secret123' })
   const confirmed = uniqueEmail('resend-ok')
@@ -348,16 +355,14 @@ test('resend: same answer for unknown, unconfirmed and confirmed addresses; send
   const answers = []
   for (const email of [uniqueEmail('resend-unknown'), confirmed, unconfirmed]) {
     const res = await post('/auth/resend-verification', { email })
-    assert.equal(res.statusCode, 200)
+    assert.equal(res.statusCode, 400)
     answers.push(res.json())
   }
-  assert.deepEqual(answers[0], { status: 'ok' })
+  assert.ok(answers[0].error)
   assert.deepEqual(answers[1], answers[0])
   assert.deepEqual(answers[2], answers[0])
 
-  await waitFor(() => sent.length > 0)
-  assert.equal(sent.length, 1)
-  assert.equal(sent[0].to, unconfirmed)
+  assert.equal(sent.length, 0)
 
   assert.equal((await post('/auth/resend-verification', { email: 'not-an-email' })).statusCode, 400)
   assert.equal((await post('/auth/resend-verification', {})).statusCode, 400)
@@ -365,13 +370,66 @@ test('resend: same answer for unknown, unconfirmed and confirmed addresses; send
 
 test('resend: the sending limits still apply', async () => {
   const email = uniqueEmail('resend-limit')
-  await post('/auth/signup', { name: 'L', email, password: 'secret123' })
+  const signup = await post('/auth/signup', { name: 'L', email, password: 'secret123' })
+  const resendToken = assertSignupResponse(signup, email)
   sent.length = 0
   // no time passed: cooldown blocks it, the answer is the same and nothing is sent
-  const res = await post('/auth/resend-verification', { email })
+  const res = await post('/auth/resend-verification', { email, resendToken })
   assert.deepEqual(res.json(), { status: 'ok' })
   await new Promise((r) => setTimeout(r, 100))
   assert.equal(sent.length, 0)
+})
+
+for (const firstDelivery of ['sent', 'throttled', 'failed']) {
+  test(`resend preserves the owner's signup snapshot despite earlier and later signups (${firstDelivery})`, async () => {
+    const email = uniqueEmail('resend-snapshot')
+    await post('/auth/signup', { name: 'Earlier request', email, password: 'earlier-pass' })
+    if (firstDelivery !== 'throttled') ageEmails()
+    if (firstDelivery === 'failed') mail.setMailTransport(async () => { throw new Error('provider unavailable') })
+    const owner = await post('/auth/signup', { name: 'Owner', email, password: 'owner-pass' })
+    const resendToken = assertSignupResponse(owner, email)
+    mail.setMailTransport(async message => sent.push(message))
+    ageEmails()
+    await post('/auth/signup', { name: 'Later request', email, password: 'later-pass' })
+    ageEmails()
+    sent.length = 0
+    const resend = await post('/auth/resend-verification', { email, resendToken })
+    assert.equal(resend.statusCode, 200)
+    assert.equal(sent.length, 1)
+    assert.equal((await post('/auth/verify-email', { token: tokenFrom(sent[0]) })).statusCode, 200)
+    assert.equal(db.dbGetUserByEmail(email).name, 'Owner')
+    assert.equal((await post('/auth/login', { email, password: 'owner-pass' })).statusCode, 200)
+    assert.equal((await post('/auth/login', { email, password: 'earlier-pass' })).statusCode, 401)
+    assert.equal((await post('/auth/login', { email, password: 'later-pass' })).statusCode, 401)
+    assert.equal(db.default.prepare('SELECT count(*) AS n FROM signup_requests WHERE user_id = ?').get(db.dbGetUserByEmail(email).id).n, 0)
+    sent.length = 0
+    assert.equal((await post('/auth/resend-verification', { email, resendToken })).statusCode, 400)
+    assert.equal(sent.length, 0)
+  })
+}
+
+test('resend capability is hashed, email-bound, expires, and cannot confirm an account', async () => {
+  const email = uniqueEmail('resend-capability')
+  const result = await post('/auth/signup', { name: 'Owner', email, password: 'owner-pass' })
+  const resendToken = assertSignupResponse(result, email)
+  const hash = ev.hashVerificationToken(resendToken)
+  const row = db.default.prepare('SELECT * FROM signup_requests WHERE token_hash = ?').get(hash)
+  assert.ok(row)
+  assert.equal(db.default.prepare('SELECT * FROM signup_requests WHERE token_hash = ?').get(resendToken), undefined)
+  assert.equal((await post('/auth/verify-email', { token: resendToken })).statusCode, 400)
+  ageEmails()
+  sent.length = 0
+  for (const payload of [
+    { email, resendToken: 'x'.repeat(43) },
+    { email: uniqueEmail('other'), resendToken },
+    { email, resendToken: {} },
+    { email },
+  ]) assert.equal((await post('/auth/resend-verification', payload)).statusCode, 400)
+  db.default.prepare('UPDATE signup_requests SET expires_at = unixepoch() WHERE token_hash = ?').run(hash)
+  assert.equal((await post('/auth/resend-verification', { email, resendToken })).statusCode, 400)
+  assert.equal(sent.length, 0)
+  ev.runEmailVerificationCleanup()
+  assert.equal(db.default.prepare('SELECT * FROM signup_requests WHERE token_hash = ?').get(hash), undefined)
 })
 
 test('email change: needs the password, sends the link to the NEW address, applies it only when confirmed', async () => {
@@ -518,7 +576,7 @@ for (const failure of [false, true]) {
     ageEmails()
     if (failure) mail.setMailTransport(async () => { throw new Error('provider down') })
     const res = await post('/auth/signup', { name: 'Intruder', email, password: 'intruder-pass' })
-    assert.deepEqual(res.json(), { status: 'verification_required', email })
+    assertSignupResponse(res, email)
     assert.equal((await post('/auth/verify-email', { token: original })).statusCode, 200)
     assert.equal(db.dbGetUserByEmail(email).name, 'Owner')
     assert.equal((await post('/auth/login', { email, password: 'owner-pass' })).statusCode, 200)
@@ -664,7 +722,7 @@ test('signup keeps pending requests recoverable but explicitly rejects verified 
     const res = await post('/auth/signup', { name: 'Attempt', email, password: 'chosen-pass' })
     assert.equal(res.statusCode, email === verified ? 409 : 200)
     if (email === verified) assert.equal(res.json().code, 'email_already_registered')
-    else assert.deepEqual(res.json(), { status: 'verification_required', email })
+    else assertSignupResponse(res, email)
     assert.equal(res.cookies.length, 0)
     const login = await post('/auth/login', { email, password: 'chosen-pass' })
     assert.equal(login.statusCode, 401)
@@ -700,7 +758,7 @@ test('signup response does not wait for email delivery or expose provider failur
     ])
     assert.equal(completed, false)
     assert.equal(result.statusCode, 200)
-    assert.deepEqual(result.json(), { status: 'verification_required', email })
+    assertSignupResponse(result, email)
   } finally {
     release()
     await new Promise(resolve => setImmediate(resolve))
