@@ -2,8 +2,7 @@ import type React from "react"
 import { useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import { createSocket } from "./socket"
-import { applyTextPatch } from "./textPatch"
-import type { TextPatch } from "./textPatch"
+import { FileSync, type FileSnapshot, type SyncView, type EditResult } from "./fileSync"
 import type { FileNode, Lang, RemoteParticipant } from "./highlight"
 import { RUN_CMD } from "./highlight"
 import type { User } from "@/components/auth-provider"
@@ -27,6 +26,7 @@ type IncomingFile = {
   name: string
   type: string
   content?: string
+  revision?: string
   parentId?: string
   language?: string
 }
@@ -35,7 +35,6 @@ export interface UseSocketCallbacks {
   setNodes: (updater: FileNode[] | ((prev: FileNode[]) => FileNode[])) => void
   setActiveContent: (updater: string | ((prev: string) => string)) => void
   activeIdRef: { current: string }
-  lastSyncedContent: { current: Record<string, string> }
   originals: { current: Record<string, string> }
   importingRef: { current: boolean }
   openFile: (id: string) => void
@@ -45,12 +44,17 @@ export interface UseSocketCallbacks {
   outputEndRef: { current: HTMLDivElement | null }
   setFormatting: (v: boolean) => void
   applyFormat: (code: string) => void
-  applyRemoteContent: (fileId: string, previousSynced: string | undefined, content: string) => void
+  applySyncedContent: (fileId: string, content: string, mapPosition?: (pos: number) => number) => void
 }
 
 export interface UseSocketResult {
   socketRef: React.RefObject<ReturnType<typeof createSocket> | null>
   connected: boolean
+  syncViews: Record<string, SyncView>
+  editFile: (fileId: string, content: string) => void
+  flushFiles: () => void
+  retrySync: (fileId: string) => void
+  useShared: (fileId: string) => void
   participants: RemoteParticipant[]
   myRole: Role
   roomName: string | null
@@ -86,6 +90,8 @@ export function useSocket(
   const [roomHasPassword, setRoomHasPassword] = useState(false)
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
 
+  const syncRef = useRef<FileSync | null>(null)
+  const [syncViews, setSyncViews] = useState<Record<string, SyncView>>({})
   const cb = useRef(callbacks)
   cb.current = callbacks
 
@@ -94,6 +100,20 @@ export function useSocket(
 
     const socket = createSocket()
     socketRef.current = socket
+    const sync = new FileSync((fileId, baseRevision, patch, done) => {
+      socket.timeout(8000).emit('code-patch', { fileId, baseRevision, ...patch }, (error: Error | null, result: EditResult) => {
+        done(error ? { status: 'error', uncertain: true, error: 'No save confirmation received. Your draft is kept in this tab. Retry when connected.' } : result)
+      })
+    }, (fileId, view, mapPosition) => {
+      setSyncViews(prev => ({ ...prev, [fileId]: view }))
+      cb.current.setNodes(prev => prev.map(node => node.id === fileId ? { ...node, content: view.text } : node))
+      cb.current.applySyncedContent(fileId, view.text, mapPosition)
+    })
+    syncRef.current = sync
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      if (sync.hasPending()) { event.preventDefault(); event.returnValue = '' }
+    }
+    window.addEventListener('beforeunload', beforeUnload)
     socket.connect()
 
     socket.on("connect", () => {
@@ -104,7 +124,7 @@ export function useSocket(
       socket.emit("join-room", { roomId, userName: user.name, isNew, roomName: initialName })
     })
 
-    socket.on("disconnect", () => setConnected(false))
+    socket.on("disconnect", () => { setConnected(false); sync.disconnect() })
 
     socket.on("knock-pending", () => {
       setKnockStatus("pending")
@@ -150,20 +170,19 @@ export function useSocket(
       hasPassword?: boolean
       chatHistory?: ChatMessage[]
     }) => {
+      sync.connect((files ?? []).filter(f => f.type === "file" && f.revision).map(f => ({ fileId: f.id, content: f.content ?? "", revision: f.revision! })))
       if (files && files.length > 0) {
         const nodes: FileNode[] = files.map((f) => ({
           id: f.id,
           name: f.name,
           kind: f.type as "file" | "folder",
           parentId: f.parentId ?? "root",
-          content: f.content ?? "",
+          content: sync.view(f.id)?.text ?? f.content ?? "",
           open: true,
         }))
-        cb.current.setNodes(nodes)
-        for (const n of nodes) {
-          if (n.kind === "file") cb.current.lastSyncedContent.current[n.id] = n.content ?? ""
-        }
-        const firstFile = nodes.find((n) => n.kind === "file")
+        cb.current.setNodes(prev => [...nodes, ...prev.filter(node =>
+          !nodes.some(current => current.id === node.id) && sync.view(node.id)?.pending)])
+        const firstFile = nodes.find(n => n.id === cb.current.activeIdRef.current && n.kind === "file") ?? nodes.find((n) => n.kind === "file")
         if (firstFile) {
           cb.current.openFile(firstFile.id)
         }
@@ -224,33 +243,9 @@ export function useSocket(
       }
     })
 
-    socket.on("code-update", ({ fileId, content, fromSocketId }: { fileId: string; content: string; fromSocketId?: string }) => {
-
-      const previousSynced = cb.current.lastSyncedContent.current[fileId]
-      cb.current.lastSyncedContent.current[fileId] = content
-
-      if (fromSocketId === socket.id) return
-      cb.current.setNodes((prev) => prev.map((n) => (n.id === fileId ? { ...n, content } : n)))
-      // Merge with any local edit not sent yet instead of overwriting the editor
-      cb.current.applyRemoteContent(fileId, previousSynced, content)
-    })
-
-    socket.on("code-patch", ({ fileId, start, deleteCount, insert }: TextPatch & { fileId: string }) => {
-      const apply = (text: string) => applyTextPatch(text, { start, deleteCount, insert })
-      const synced = cb.current.lastSyncedContent.current[fileId]
-      if (synced !== undefined) cb.current.lastSyncedContent.current[fileId] = apply(synced)
-      cb.current.setNodes((prev) => {
-        return prev.map((n) => {
-          if (n.id !== fileId) return n
-          const content = cb.current.lastSyncedContent.current[fileId] ?? apply(n.content ?? "")
-          return { ...n, content }
-        })
-      })
-      cb.current.setActiveContent((cur) => {
-        const aid = cb.current.activeIdRef.current
-        if (aid !== fileId) return cur
-        return cb.current.lastSyncedContent.current[fileId] ?? apply(cur)
-      })
+    socket.on("code-update", (snapshot: FileSnapshot) => {
+      sync.receive(snapshot)
+      sync.flush(snapshot.fileId)
     })
 
     socket.on("cursor-update", ({ userId, fileId, line, column, col }: { userId: string; fileId: string; line: number; column?: number; col?: number }) => {
@@ -305,6 +300,7 @@ export function useSocket(
     })
 
     socket.on("file-created", ({ node, parentId }: { node: IncomingFile; parentId: string | null }) => {
+      if (node.type === "file" && node.revision) sync.receive({ fileId: node.id, content: node.content ?? "", revision: node.revision })
       const newNode: FileNode = {
         id: node.id,
         name: node.name,
@@ -322,7 +318,8 @@ export function useSocket(
     })
 
     socket.on("file-deleted", ({ fileId }: { fileId: string }) => {
-      cb.current.setNodes((prev) => prev.filter((n) => n.id !== fileId))
+      sync.remove(fileId)
+      cb.current.setNodes((prev) => prev.filter((n) => n.id !== fileId || sync.view(fileId)?.pending))
     })
 
     socket.on("file-renamed", ({ fileId, name }: { fileId: string; name: string }) => {
@@ -342,6 +339,7 @@ export function useSocket(
     })
 
     socket.on("files-imported", ({ nodes: imported }: { nodes: IncomingFile[] }) => {
+      for (const node of imported) if (node.type === "file" && node.revision) sync.receive({ fileId: node.id, content: node.content ?? "", revision: node.revision })
       cb.current.setNodes((prev) => {
         const existingIds = new Set(prev.map((n) => n.id))
         const newNodes: FileNode[] = imported
@@ -367,6 +365,9 @@ export function useSocket(
     })
 
     return () => {
+      window.removeEventListener("beforeunload", beforeUnload)
+      sync.disconnect()
+      if (syncRef.current === sync) syncRef.current = null
       socket.off("connect")
       socket.off("disconnect")
       socket.off("knock-pending")
@@ -383,7 +384,6 @@ export function useSocket(
       socket.off("role-refreshed")
       socket.off("member-kicked")
       socket.off("code-update")
-      socket.off("code-patch")
       socket.off("cursor-update")
       socket.off("run-started")
       socket.off("run-result")
@@ -419,7 +419,22 @@ export function useSocket(
     socketRef.current.emit("chat-send", { content })
   }
 
+  function retrySync(fileId: string) {
+    const socket = socketRef.current, sync = syncRef.current
+    if (!socket?.connected || !sync) return
+    socket.timeout(8000).emit("get-file-state", { fileId }, (error: Error | null, result: EditResult) => {
+      if (syncRef.current !== sync || error || result.status !== "ok") return
+      sync.receive(result)
+      sync.flush(fileId)
+    })
+  }
+
   return {
+    syncViews,
+    editFile: (fileId: string, content: string) => syncRef.current?.edit(fileId, content),
+    flushFiles: () => syncRef.current?.flush(),
+    retrySync,
+    useShared: (fileId: string) => syncRef.current?.useShared(fileId),
     socketRef,
     connected,
     participants,

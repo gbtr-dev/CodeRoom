@@ -4,8 +4,8 @@ import {
   getOrCreateRoom,
   addParticipant,
   removeParticipant,
-  updateFileContent,
-  applyFilePatch,
+  editFileAtRevision,
+  getFileSnapshot,
   createFile,
   deleteFile,
   getRoomFiles,
@@ -481,35 +481,42 @@ export function registerSocketHandlers(io: Server) {
       log.info(`[ROOM] Knock denied — user = ${knock.userName} | by = ${currentUser} | room = ${currentRoom}`)
     })
 
-    onClientEvent('code-change', ({ fileId, content }: { fileId: string; content: string }) => {
-      if (!checkRateLimit(socket, 'code-change')) return
-      if (!isValidId(fileId)) return
-      if (!isBoundedString(content, LIMITS.FILE_CONTENT)) return
-      if (!currentRoom || !socket.data.admitted) return
-      if (getRole(socket) === 'viewer') return
-      if (!updateFileContent(currentRoom, fileId, content)) {
-        log.warn(`[ROOM] code-change su file non appartenente alla room — file = ${fileId} | user = ${currentUser} | room = ${currentRoom}`)
-        return
+    type EditReply = (result: ReturnType<typeof editFileAtRevision>) => void
+    function receiveEdit(event: 'code-change' | 'code-patch', data: Record<string, unknown>, callback?: EditReply) {
+      const fail = (error: string) => {
+        if (typeof callback === 'function') callback({ status: 'error', error })
+        else socket.emit('sync-error', { error })
       }
-
-      io.to(currentRoom).emit('code-update', { fileId, content, fromSocketId: socket.id })
-    })
-
-    onClientEvent('code-patch', ({ fileId, start, deleteCount, insert }: { fileId: string; start: number; deleteCount: number; insert: string }) => {
-      if (!checkRateLimit(socket, 'code-patch')) return
-      if (!isValidId(fileId)) return
-      if (!isNonNegativeInt(start, LIMITS.FILE_CONTENT)) return
-      if (!isNonNegativeInt(deleteCount, LIMITS.FILE_CONTENT)) return
-      if (!isBoundedString(insert, LIMITS.PATCH_INSERT)) return
-      if (!currentRoom || !socket.data.admitted) return
-      if (getRole(socket) === 'viewer') return
-
-      const updated = applyFilePatch(currentRoom, fileId, start, deleteCount, insert)
-      if (updated === null) {
-        log.warn(`[ROOM] code-patch su file non appartenente alla room — file = ${fileId} | user = ${currentUser} | room = ${currentRoom}`)
-        return
+      if (!checkRateLimit(socket, event)) { fail('Too many edits. Please retry.'); return }
+      if (!currentRoom || !socket.data.admitted || getRole(socket) === 'viewer') {
+        fail('You no longer have permission to edit this file.'); return
       }
-      io.to(currentRoom).emit('code-update', { fileId, content: updated, fromSocketId: socket.id })
+      const { fileId, baseRevision } = data
+      if (!isValidId(fileId) || !isValidId(baseRevision)) { fail('Reload the editor to synchronize this file.'); return }
+      let edit: { content: string } | { start: number; deleteCount: number; insert: string }
+      if (event === 'code-change') {
+        if (!isBoundedString(data.content, LIMITS.FILE_CONTENT)) { fail('Invalid file content.'); return }
+        edit = { content: data.content }
+      } else {
+        if (!isNonNegativeInt(data.start, LIMITS.FILE_CONTENT) || !isNonNegativeInt(data.deleteCount, LIMITS.FILE_CONTENT) ||
+          !isBoundedString(data.insert, LIMITS.PATCH_INSERT)) { fail('Invalid file edit.'); return }
+        edit = { start: data.start, deleteCount: data.deleteCount, insert: data.insert }
+      }
+      const result = editFileAtRevision(currentRoom, fileId, baseRevision, edit)
+      if (result.status === 'ok') socket.to(currentRoom).emit('code-update', result)
+      if (typeof callback === 'function') callback(result)
+      else socket.emit('code-sync-result', result)
+    }
+
+    onClientEvent('code-change', (data: Record<string, unknown>, callback?: EditReply) => receiveEdit('code-change', data, callback))
+    onClientEvent('code-patch', (data: Record<string, unknown>, callback?: EditReply) => receiveEdit('code-patch', data, callback))
+    onClientEvent('get-file-state', ({ fileId }: { fileId: string }, callback?: EditReply) => {
+      if (typeof callback !== 'function') return
+      if (!checkRateLimit(socket, 'get-file-state') || !isValidId(fileId) || !currentRoom || !socket.data.admitted) {
+        callback({ status: 'error', error: 'File is unavailable. Please reconnect.' }); return
+      }
+      const snapshot = getFileSnapshot(currentRoom, fileId)
+      callback(snapshot ? { status: 'ok', ...snapshot } : { status: 'error', error: 'File not found.' })
     })
 
     onClientEvent('cursor-move', ({ fileId, line, column }: { fileId: string; line: number; column: number }) => {

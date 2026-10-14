@@ -42,7 +42,8 @@ const CODE_SYNC_DEBOUNCE_MS = 120
 const CODE_SYNC_MAX_WAIT_MS = 400
 const CURSOR_THROTTLE_MS = 80
 
-import { computeTextPatch, applyTextPatch, rebaseLocalEdit } from "@/lib/textPatch"
+import { SyncStatus } from "@/components/room/SyncStatus"
+import { applyTextPatch } from "@/lib/textPatch"
 import type { TextPatch } from "@/lib/textPatch"
 
 /* ------------------------------------------------------------------ */
@@ -159,10 +160,8 @@ export default function CoderoomPage() {
   const originals = useRef<Record<string, string>>(
     Object.fromEntries(defaultNodes().filter((n) => n.kind === "file").map((n) => [n.id, n.content ?? ""])),
   )
-  const lastSyncedContent = useRef<Record<string, string>>({})
   const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const maxSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const pendingSyncRef = useRef<{ fileId: string; content: string } | null>(null)
   const pendingSelectionRef = useRef<{ text: string; start: number; end: number } | null>(null)
   const cursorThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastCursorEmitRef = useRef(0)
@@ -175,6 +174,7 @@ export default function CoderoomPage() {
   const {
     socketRef,
     connected,
+    syncViews, editFile, flushFiles, retrySync, useShared,
     participants,
     myRole,
     roomName,
@@ -190,7 +190,6 @@ export default function CoderoomPage() {
     setNodes,
     setActiveContent,
     activeIdRef,
-    lastSyncedContent,
     originals,
     importingRef,
     openFile: (id: string) => openFile(id),
@@ -202,9 +201,8 @@ export default function CoderoomPage() {
     applyFormat: (code: string) => {
       if (!activeIdRef.current) return
       setActiveContent(code)
-      lastSyncedContent.current[activeIdRef.current] = code
     },
-    applyRemoteContent,
+    applySyncedContent,
   })
 
   useEffect(() => { setLockHasPassword(roomHasPassword) }, [roomHasPassword])
@@ -282,7 +280,6 @@ export default function CoderoomPage() {
     const node = nodes.find((n) => n.id === activeId && n.kind === "file")
     const content = node?.content ?? ""
     setActiveContent(content)
-    if (activeId) lastSyncedContent.current[activeId] = content
   }, [activeId])
 
   function flushCodeSync() {
@@ -294,26 +291,11 @@ export default function CoderoomPage() {
       clearTimeout(maxSyncTimerRef.current)
       maxSyncTimerRef.current = null
     }
-    const pending = pendingSyncRef.current
-    if (!pending) return
-    pendingSyncRef.current = null
-
-    const { fileId, content } = pending
-    const lastSynced = lastSyncedContent.current[fileId] ?? ""
-    if (content === lastSynced) return
-
-    const patch = computeTextPatch(lastSynced, content)
-    const patchSize = patch.deleteCount + patch.insert.length
-    if (patchSize < content.length) {
-      socketRef.current?.emit("code-patch", { fileId, ...patch })
-    } else {
-      socketRef.current?.emit("code-change", { fileId, content })
-    }
-    lastSyncedContent.current[fileId] = content
+    flushFiles()
   }
 
   function scheduleCodeSync(fileId: string, content: string) {
-    pendingSyncRef.current = { fileId, content }
+    editFile(fileId, content)
     if (syncTimerRef.current) clearTimeout(syncTimerRef.current)
     syncTimerRef.current = setTimeout(flushCodeSync, CODE_SYNC_DEBOUNCE_MS)
     if (!maxSyncTimerRef.current) {
@@ -321,34 +303,13 @@ export default function CoderoomPage() {
     }
   }
 
-  // A remote update arrived for the open file. Keep the keystrokes that were not sent yet
-  // (rebased on top of the remote text) instead of overwriting them, and keep the caret in place.
-  function applyRemoteContent(fileId: string, previousSynced: string | undefined, remote: string) {
+  function applySyncedContent(fileId: string, content: string, mapPosition?: (pos: number) => number) {
     if (activeIdRef.current !== fileId) return
     const ta = textareaRef.current
-    const local = ta ? ta.value : remote
-
-    if (previousSynced === undefined) {
-      pendingSyncRef.current = null
-      setActiveContent(remote)
-      return
+    if (ta && mapPosition && content !== ta.value) {
+      pendingSelectionRef.current = { text: content, start: mapPosition(ta.selectionStart), end: mapPosition(ta.selectionEnd) }
     }
-
-    const merged = rebaseLocalEdit(previousSynced, local, remote)
-    if (merged.conflict) {
-      // Overlapping edits: the remote one wins, the unsent local keystrokes are dropped
-      pendingSyncRef.current = null
-    } else if (pendingSyncRef.current?.fileId === fileId) {
-      pendingSyncRef.current = { fileId, content: merged.text }
-    }
-    if (ta && merged.text !== local) {
-      pendingSelectionRef.current = {
-        text: merged.text,
-        start: merged.mapPosition(ta.selectionStart),
-        end: merged.mapPosition(ta.selectionEnd),
-      }
-    }
-    setActiveContent(merged.text)
+    setActiveContent(content)
   }
 
   useLayoutEffect(() => {
@@ -1354,6 +1315,13 @@ export default function CoderoomPage() {
             })}
           </div>
 
+          {activeNode && <SyncStatus
+            view={syncViews[activeId]}
+            connected={connected}
+            onDownload={() => exportFile({ ...activeNode, content: syncViews[activeId]?.text ?? activeContent, name: 'draft-' + activeNode.name })}
+            onUseShared={() => useShared(activeId)}
+            onRetry={() => retrySync(activeId)}
+          />}
           {/* editor */}
           <Editor
             activeNodeName={activeNode?.name ?? ""}
@@ -1361,7 +1329,7 @@ export default function CoderoomPage() {
             lang={lang}
             lineCount={lineCount}
             highlightedCode={highlightedCode}
-            canEdit={canEdit}
+            canEdit={canEdit && !!syncViews[activeId]}
             activeLine={activeLine}
             activeCol={activeCol}
             scroll={scroll}

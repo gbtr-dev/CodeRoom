@@ -50,6 +50,8 @@ function mapThroughPatch(pos: number, p: TextPatch): number {
  * Non-overlapping edits are both kept; if they overlap, the remote edit wins.
  */
 export function rebaseLocalEdit(base: string, local: string, remote: string): RebaseResult {
+  // A reconnect or an acknowledgement may already include our exact draft.
+  if (local === remote) return { text: remote, conflict: false, mapPosition: pos => pos }
   const remotePatch = computeTextPatch(base, remote)
   const localPatch = computeTextPatch(base, local)
 

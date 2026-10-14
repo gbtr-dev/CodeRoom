@@ -23,6 +23,7 @@ export type Room = {
   id: string
   participants: Map<string, { name: string; color: string; userId?: string; role?: RoomRole; avatar?: string | null }>
   fileContent: Map<string, string>
+  fileRevision: Map<string, string>
   cacheLoaded: boolean
 }
 
@@ -64,6 +65,7 @@ function ensureCacheLoaded(room: Room, rows?: ReturnType<typeof dbGetFiles>) {
   for (const row of data) {
     if (row.kind === 'file') {
       room.fileContent.set(row.id, row.content ?? '')
+      room.fileRevision.set(row.id, randomUUID())
       fileRoomIndex.set(row.id, room.id)
     }
   }
@@ -141,6 +143,7 @@ export function getOrCreateRoom(roomId: string): Room {
       id: roomId,
       participants: new Map(),
       fileContent: new Map(),
+      fileRevision: new Map(),
       cacheLoaded: false,
     })
   }
@@ -162,6 +165,7 @@ export function getRoomFiles(roomId: string): FileNode[] {
       name: row.name,
       type: row.kind,
       content: row.kind === 'file' ? (room.fileContent.get(row.id) ?? row.content) : undefined,
+      revision: row.kind === 'file' ? room.fileRevision.get(row.id) : undefined,
       language: getLangFromName(row.name),
       parentId,
     }
@@ -197,6 +201,7 @@ export function updateFileContent(roomId: string, fileId: string, content: strin
   ensureCacheLoaded(room)
   if (!room.fileContent.has(fileId)) return false
   room.fileContent.set(fileId, content)
+  room.fileRevision.set(fileId, randomUUID())
   fileRoomIndex.set(fileId, roomId)
   scheduleDbFlush(fileId, roomId)
   return true
@@ -221,6 +226,28 @@ export function applyFilePatch(
   return updated
 }
 
+export function getFileSnapshot(roomId: string, fileId: string) {
+  const room = getOrCreateRoom(roomId)
+  ensureCacheLoaded(room)
+  if (!room.fileContent.has(fileId)) return null
+  return { fileId, content: room.fileContent.get(fileId)!, revision: room.fileRevision.get(fileId)! }
+}
+
+/** The revision check and in-memory mutation are synchronous, with no intervening await. */
+export function editFileAtRevision(roomId: string, fileId: string, revision: string,
+  edit: { content: string } | { start: number; deleteCount: number; insert: string }) {
+  const before = getFileSnapshot(roomId, fileId)
+  if (!before) return { status: 'error' as const, error: 'File not found.' }
+  if (before.revision !== revision) return { status: 'conflict' as const, ...before }
+  if ('content' in edit) {
+    if (edit.content.length > LIMITS.FILE_CONTENT) return { status: 'error' as const, error: 'File is too large.' }
+    updateFileContent(roomId, fileId, edit.content)
+  } else if (applyFilePatch(roomId, fileId, edit.start, edit.deleteCount, edit.insert) === null) {
+    return { status: 'error' as const, error: 'Invalid edit or file is too large.' }
+  }
+  return { status: 'ok' as const, ...getFileSnapshot(roomId, fileId)! }
+}
+
 export function createFile(roomId: string, parentId: string | null, name: string, type: 'file' | 'folder', content?: string) {
   const id = randomUUID()
   const node = {
@@ -233,8 +260,10 @@ export function createFile(roomId: string, parentId: string | null, name: string
   dbCreateFile(roomId, node)
 
   const room = getOrCreateRoom(roomId)
+  ensureCacheLoaded(room)
   if (type === 'file') {
     room.fileContent.set(id, content ?? '')
+    room.fileRevision.set(id, randomUUID())
     fileRoomIndex.set(id, roomId)
   }
 
@@ -243,6 +272,7 @@ export function createFile(roomId: string, parentId: string | null, name: string
     name,
     type,
     content: node.content,
+    revision: room.fileRevision.get(id),
     language: getLangFromName(name),
     parentId: node.parentId,
   }
@@ -251,6 +281,7 @@ export function createFile(roomId: string, parentId: string | null, name: string
 function removeFileFromCache(fileId: string, room?: Room) {
   cancelPendingFlush(fileId)
   room?.fileContent.delete(fileId)
+  room?.fileRevision.delete(fileId)
   fileRoomIndex.delete(fileId)
 }
 

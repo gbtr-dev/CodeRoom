@@ -31,6 +31,7 @@ type RateLimitConfig = { capacity: number; refillPerSec: number }
 const RATE_LIMITS: Record<string, RateLimitConfig> = {
   'code-change':      { capacity: 25, refillPerSec: 15 },
   'code-patch':       { capacity: 25, refillPerSec: 15 },
+  'get-file-state':   { capacity: 10, refillPerSec: 2 },
   'cursor-move':      { capacity: 20, refillPerSec: 15 },
   'create-file':      { capacity: 10, refillPerSec: 2 },
   'import-zip':       { capacity: 2,  refillPerSec: 0.1 },
