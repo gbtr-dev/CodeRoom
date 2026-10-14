@@ -19,6 +19,7 @@ process.env.LOG_LEVEL = 'error'
 delete process.env.DOCKER_HOST
 
 const db = require('../src/db')
+const mail = require('../src/mail')
 const { createSession, registerAuthRoutes, SESSION_COOKIE_NAME } = require('../src/auth')
 const { registerSocketHandlers } = require('../src/socket')
 const { flushAllRoomContent, getOrCreateRoom, getFileContent } = require('../src/rooms')
@@ -264,18 +265,32 @@ test('logout revokes every tab of that session, including pending and idle conne
   assert.ok(db.dbGetSession(otherSession.token))
 })
 
-test('email change revokes other sessions even before they enter a room', async (t) => {
+test('confirming an email change revokes every session, even before they enter a room', async (t) => {
   const member = user()
   const otherSession = { id: member.id, token: createSession(member.id).token }
-  const kept = await clientFor(t, member)
-  const idle = await clientFor(t, otherSession)
-  const revoked = io.sockets.sockets.get(idle.id)
+  const first = await clientFor(t, member)
+  const second = await clientFor(t, otherSession)
+  const firstSocket = io.sockets.sockets.get(first.id)
+  const secondSocket = io.sockets.sockets.get(second.id)
+
+  const messages = []
+  mail.setMailTransport(async (message) => { messages.push(message) })
+  t.after(() => mail.setMailTransport(null))
+
   const response = await request(member, 'PUT', '/auth/me/email', {
     email: `${randomUUID()}@example.invalid`, currentPassword: 'old-password',
   })
   assert.equal(response.statusCode, 200)
-  assert.equal(revoked.connected, false)
-  assert.equal(io.sockets.sockets.get(kept.id).connected, true)
+  assert.equal(response.json().status, 'confirmation_sent')
+  // asking for the change does not end any session: the email only changes when the link is opened
+  assert.equal(firstSocket.connected, true)
+  assert.equal(secondSocket.connected, true)
+
+  const token = new URL(messages[0].text.match(/https?:\/\/\S+/)[0]).searchParams.get('token')
+  const confirmed = await app.inject({ method: 'POST', url: '/auth/verify-email', payload: { token } })
+  assert.equal(confirmed.statusCode, 200)
+  assert.equal(firstSocket.connected, false)
+  assert.equal(secondSocket.connected, false)
 })
 
 test('revoked and expired sessions cannot send another event on an existing socket', async (t) => {

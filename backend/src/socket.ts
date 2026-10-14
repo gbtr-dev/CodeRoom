@@ -18,6 +18,7 @@ import { verifySessionToken, SESSION_COOKIE_NAME } from './auth'
 import bcrypt from 'bcryptjs'
 import { createLogger, maskEmail } from './logger'
 import { checkRateLimit } from './rateLimiter'
+import { workloadLimit, connectionLimit } from './workloadLimits'
 import { safeOn } from './safeHandler'
 import { LIMITS, isString, isNonEmptyString, isBoundedString, isValidId, isNonNegativeInt, isFileKind, isValidFileName } from './validation'
 
@@ -270,6 +271,16 @@ export function registerSocketHandlers(io: Server) {
       }
     }
     const session = handshakeToken ? verifySessionToken(handshakeToken) : null
+    // Identity is derived from the verified cookie, never from a client-supplied user ID.
+    // Use the transport peer for guests; do not trust arbitrary forwarded headers.
+    const workloadKey = session ? `user:${session.userId}` : `guest:${socket.handshake.address}`
+    const releaseConnection = connectionLimit.acquire(workloadKey)
+    if (!releaseConnection) {
+      socket.emit('error', { message: 'Too many open connections. Close another tab and try again.' })
+      socket.disconnect(true)
+      return
+    }
+    socket.once('disconnect', releaseConnection)
     connectionAccess.set(socket, {
       userId: session?.userId ?? null,
       token: session ? handshakeToken : undefined,
@@ -601,15 +612,24 @@ export function registerSocketHandlers(io: Server) {
       if (!currentRoom || !socket.data.admitted) return
       if (getRole(socket) === 'viewer') return
 
-      socket.emit('run-started', { language })
-      const result = await executeCode(language, code, stdin)
-      socket.emit('run-result', {
-        output: result.output,
-        error: result.error,
-        exitCode: result.exitCode,
-        duration: result.duration,
-        language,
-      })
+      const release = workloadLimit.acquire(workloadKey)
+      if (!release) {
+        socket.emit('run-result', { output: '', error: 'Execution capacity reached. Wait for the current jobs to finish and try again.', exitCode: 1, duration: 0, language })
+        return
+      }
+      try {
+        socket.emit('run-started', { language })
+        const result = await executeCode(language, code, stdin)
+        socket.emit('run-result', {
+          output: result.output,
+          error: result.error,
+          exitCode: result.exitCode,
+          duration: result.duration,
+          language,
+        })
+      } finally {
+        release()
+      }
     })
 
     onClientEvent('format-code', async ({ language, code }: { language: string; code: string }) => {
@@ -619,8 +639,17 @@ export function registerSocketHandlers(io: Server) {
       if (!currentRoom || !socket.data.admitted) return
       if (getRole(socket) === 'viewer') return
 
-      const result = await formatCode(language, code)
-      socket.emit('format-result', result)
+      const release = workloadLimit.acquire(workloadKey)
+      if (!release) {
+        socket.emit('format-result', { formatted: code, error: 'Execution capacity reached. Wait for the current jobs to finish and try again.' })
+        return
+      }
+      try {
+        const result = await formatCode(language, code)
+        socket.emit('format-result', result)
+      } finally {
+        release()
+      }
     })
 
     // Owner-only: change a member's role

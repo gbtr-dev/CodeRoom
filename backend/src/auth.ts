@@ -12,11 +12,9 @@ import {
   dbIsRoomMember,
   dbDeleteRoom,
   dbUpdateUserName,
-  dbUpdateUserEmail,
   dbUpdateUserPassword,
   dbDeleteUser,
   dbGetOwnedRooms,
-  dbAddRoomMember,
   dbGetMemberRole,
   dbSetRoomPassword,
   dbClearRoomPassword,
@@ -24,6 +22,7 @@ import {
   dbGetRoomMembers,
   dbRemoveMember,
   dbCreateSession,
+  dbCreateSessionForCredentials,
   dbGetSession,
   dbDeleteSession,
   dbDeleteOtherSessions,
@@ -31,15 +30,39 @@ import {
   dbClearUserAvatar,
   dbCreateInvite,
   dbGetInvite,
-  dbDeleteInvite,
+  dbAcceptInvite,
+  dbConsumeEmailVerification,
+  dbDeleteSessionsByUser,
+  dbReplaceUnverifiedUser,
   type RoomRole,
 } from './db'
 import { notifyRoomDeleted, notifyUserLeftRoom, notifyMemberRoleChanged, notifyMemberRemoved, disconnectAllUserSockets, disconnectRevokedUserSockets } from './socket'
 import { createLogger, maskEmail } from './logger'
 import { checkLoginLock, recordLoginFailure, recordLoginSuccess } from './authRateLimiter'
 import { isValidEmail } from './validation'
+import { hashVerificationToken, sendVerificationEmail } from './emailVerification'
 
 const log = createLogger('AUTH')
+
+function readString(value: unknown): string | null {
+  return typeof value === 'string' ? value : null
+}
+
+// An email change sends a message to an arbitrary address: cap how many a single account can request
+const EMAIL_CHANGE_MAX_PER_HOUR = 5
+const emailChangeRequests = new Map<string, number[]>()
+
+function takeEmailChangeSlot(userId: string): boolean {
+  const now = Date.now()
+  const recent = (emailChangeRequests.get(userId) ?? []).filter((t) => now - t < 60 * 60 * 1000)
+  if (recent.length >= EMAIL_CHANGE_MAX_PER_HOUR) {
+    emailChangeRequests.set(userId, recent)
+    return false
+  }
+  recent.push(now)
+  emailChangeRequests.set(userId, recent)
+  return true
+}
 
 export const SESSION_COOKIE_NAME = 'coderoom_session'
 
@@ -125,7 +148,8 @@ async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
 }
 
 export async function registerAuthRoutes(app: FastifyInstance) {
-  // Signup
+  // Signup — creates an UNVERIFIED account and emails a confirmation link. No session is created:
+  // the account can only be used after the address has been confirmed.
   app.post('/auth/signup', {
     config: {
       rateLimit: {
@@ -134,7 +158,10 @@ export async function registerAuthRoutes(app: FastifyInstance) {
       },
     },
   }, async (req, reply) => {
-    const { name, email, password } = req.body as { name: string; email: string; password: string }
+    const body = (req.body ?? {}) as Record<string, unknown>
+    const name = readString(body.name)
+    const email = readString(body.email)
+    const password = readString(body.password)
 
     if (!name || !email || !password) {
       return reply.status(400).send({ error: 'Name, email and password are required' })
@@ -155,21 +182,42 @@ export async function registerAuthRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: 'Password must be 72 characters or less' })
     }
 
+    const trimmedName = name.trim()
     const normalizedEmail = email.toLowerCase().trim()
-    const existing = dbGetUserByEmail(normalizedEmail)
-    if (existing) {
-      log.warn('Signup failed — email already in use', { name: name.trim(), email: maskEmail(normalizedEmail) })
+
+    if (dbGetUserByEmail(normalizedEmail)?.email_verified_at) {
+      log.warn('Signup failed — email already in use', { name: trimmedName, email: maskEmail(normalizedEmail) })
       return reply.status(409).send({ error: 'Email already in use' })
     }
 
-    const id = randomUUID()
     const passwordHash = await bcrypt.hash(password, 10)
-    dbCreateUser(id, name.trim(), normalizedEmail, passwordHash)
 
-    log.info('Signup successful', { userId: id, name: name.trim(), email: maskEmail(normalizedEmail) })
-    const { token } = createSession(id)
-    reply.setCookie(SESSION_COOKIE_NAME, token, sessionCookieOptions(SESSION_TTL_SECONDS))
-    return reply.send({ user: { id, name: name.trim(), email: normalizedEmail } })
+    // Look the account up again right before writing (no await in between): the hash above takes
+    // time, and another request could have created or confirmed this address meanwhile.
+    const latest = dbGetUserByEmail(normalizedEmail)
+    let userId: string
+    if (latest) {
+      if (latest.email_verified_at || !dbReplaceUnverifiedUser(latest.id, trimmedName, passwordHash)) {
+        return reply.status(409).send({ error: 'Email already in use' })
+      }
+      // Someone started a signup with this address but never confirmed it: the new request takes
+      // over, so a stranger cannot keep the address blocked for the real owner.
+      userId = latest.id
+      log.info('Signup — unconfirmed account replaced', { userId, email: maskEmail(normalizedEmail) })
+    } else {
+      userId = randomUUID()
+      dbCreateUser(userId, trimmedName, normalizedEmail, passwordHash)
+      log.info('Signup successful — waiting for email confirmation', { userId, name: trimmedName, email: maskEmail(normalizedEmail) })
+    }
+
+    const result = await sendVerificationEmail({ userId, name: trimmedName, email: normalizedEmail, purpose: 'signup' })
+    const emailSent = result.status === 'sent'
+    return reply.send({
+      status: 'verification_required',
+      email: normalizedEmail,
+      emailSent,
+      ...(emailSent ? {} : { reason: result.status === 'throttled' ? result.reason : 'failed' }),
+    })
   })
 
   // Login
@@ -181,7 +229,9 @@ export async function registerAuthRoutes(app: FastifyInstance) {
       },
     },
   }, async (req, reply) => {
-    const { email, password } = req.body as { email: string; password: string }
+    const body = (req.body ?? {}) as Record<string, unknown>
+    const email = readString(body.email)
+    const password = readString(body.password)
 
     if (!email || !password) {
       return reply.status(400).send({ error: 'Email and password are required' })
@@ -210,11 +260,80 @@ export async function registerAuthRoutes(app: FastifyInstance) {
       return reply.status(401).send({ error: 'Invalid email or password' })
     }
 
+    // Only after the password is correct, so this answer cannot be used to discover who is registered
+    if (!user.email_verified_at) {
+      log.info('Login refused — email not confirmed', { userId: user.id, email: maskEmail(user.email) })
+      return reply.status(403).send({ error: 'Please confirm your email address before signing in', code: 'email_not_verified' })
+    }
+
+    const token = generateSessionToken()
+    const expiresAt = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS
+    if (!dbCreateSessionForCredentials(token, user.id, expiresAt, normalizedEmail, user.password_hash)) {
+      return reply.status(401).send({ error: 'Invalid email or password' })
+    }
+    disconnectRevokedUserSockets(user.id)
     recordLoginSuccess(normalizedEmail)
     log.info('Login successful', { userId: user.id, name: user.name, email: maskEmail(user.email) })
-    const { token } = createSession(user.id)
     reply.setCookie(SESSION_COOKIE_NAME, token, sessionCookieOptions(SESSION_TTL_SECONDS))
     return reply.send({ user: { id: user.id, name: user.name, email: user.email } })
+  })
+
+  // Confirms an email address (signup or email change). It is a POST on purpose: the page opened from
+  // the link sends it, so mail scanners that "click" links with a GET cannot use up the token.
+  app.post('/auth/verify-email', {
+    config: {
+      rateLimit: {
+        max: 10,
+        timeWindow: '1 minute',
+      },
+    },
+  }, async (req, reply) => {
+    const token = readString(((req.body ?? {}) as Record<string, unknown>).token)
+    if (!token || token.length < 20 || token.length > 128) {
+      return reply.status(400).send({ error: 'This link is not valid', code: 'invalid_token' })
+    }
+
+    const result = dbConsumeEmailVerification(hashVerificationToken(token))
+    switch (result.status) {
+      case 'ok':
+        if (result.purpose === 'change') {
+          // The address used to sign in changed: every session has to sign in again
+          dbDeleteSessionsByUser(result.userId)
+          disconnectRevokedUserSockets(result.userId)
+        }
+        log.info('Email confirmed', { userId: result.userId, email: maskEmail(result.email), purpose: result.purpose })
+        return reply.send({ status: 'verified', purpose: result.purpose, email: result.email })
+      case 'expired':
+        return reply.status(410).send({ error: 'This link has expired', code: 'token_expired' })
+      case 'conflict':
+        return reply.status(409).send({ error: 'This email address is already used by another account', code: 'email_taken' })
+      default:
+        return reply.status(400).send({ error: 'This link is not valid or was already used', code: 'invalid_token' })
+    }
+  })
+
+  // Sends the confirmation email again. The answer is always the same, so it cannot be used to find
+  // out which addresses are registered; the sending limits are applied inside sendVerificationEmail.
+  app.post('/auth/resend-verification', {
+    config: {
+      rateLimit: {
+        max: 5,
+        timeWindow: '1 minute',
+      },
+    },
+  }, async (req, reply) => {
+    const email = readString(((req.body ?? {}) as Record<string, unknown>).email)
+    if (!email || !isValidEmail(email)) {
+      return reply.status(400).send({ error: 'Please enter a valid email address' })
+    }
+
+    const user = dbGetUserByEmail(email.toLowerCase().trim())
+    if (user && !user.email_verified_at) {
+      // Not awaited, so the response time does not reveal whether an email was sent
+      sendVerificationEmail({ userId: user.id, name: user.name, email: user.email, purpose: 'signup' })
+        .catch((err) => log.error('Reinvio verifica fallito', { error: String(err) }))
+    }
+    return reply.send({ status: 'ok' })
   })
 
   // ── Route pubblica: info su un invite ────────────────────────────────
@@ -416,30 +535,56 @@ export async function registerAuthRoutes(app: FastifyInstance) {
       return reply.send({ user })
     })
 
-    // Update email
+    // Update email — the change is NOT applied here: a confirmation link goes to the new address
+    // and the email only changes when it is opened (see /auth/verify-email).
     protectedRoutes.put('/auth/me/email', async (req, reply) => {
-      const { email, currentPassword } = req.body as { email: string; currentPassword: string }
+      const body = (req.body ?? {}) as Record<string, unknown>
+      const email = readString(body.email)
+      const currentPassword = readString(body.currentPassword)
       if (!email?.trim()) return reply.status(400).send({ error: 'Email is required' })
       if (!isValidEmail(email)) return reply.status(400).send({ error: 'Please enter a valid email address' })
       if (!currentPassword) return reply.status(400).send({ error: 'Current password is required' })
 
       // Verify password before sensitive change
-      const userFull = dbGetUserByEmail((dbGetUserById(req.userId)?.email ?? ''))
-      if (!userFull) return reply.status(404).send({ error: 'User not found' })
+      const current = dbGetUserById(req.userId)
+      const userFull = dbGetUserByEmail(current?.email ?? '')
+      if (!current || !userFull) return reply.status(404).send({ error: 'User not found' })
       const valid = await bcrypt.compare(currentPassword, userFull.password_hash)
       if (!valid) return reply.status(401).send({ error: 'Incorrect password' })
 
+      const newEmail = email.toLowerCase().trim()
+      if (newEmail === current.email) {
+        return reply.status(400).send({ error: 'This is already your email address' })
+      }
+
       // Check email not already taken
-      const existing = dbGetUserByEmail(email.toLowerCase().trim())
+      const existing = dbGetUserByEmail(newEmail)
       if (existing && existing.id !== req.userId) {
         return reply.status(409).send({ error: 'Email already in use' })
       }
 
-      dbUpdateUserEmail(req.userId, email)
-      destroyOtherSessions(req.userId, req.sessionToken)
-      const user = dbGetUserById(req.userId)
-      log.info('User email updated', { userId: req.userId })
-      return reply.send({ user })
+      if (!takeEmailChangeSlot(req.userId)) {
+        return reply.status(429).send({ error: 'Too many email change requests. Please try again later.' })
+      }
+
+      const result = await sendVerificationEmail({
+        userId: req.userId, name: current.name, email: newEmail, purpose: 'change',
+        expectedPasswordHash: userFull.password_hash,
+      })
+      if (result.status === 'stale_credentials') {
+        return reply.status(401).send({ error: 'Credentials changed. Please try again.' })
+      }
+      if (result.status === 'throttled') {
+        if (result.retryAfterSeconds) reply.header('Retry-After', String(result.retryAfterSeconds))
+        return reply.status(429).send({ error: 'A confirmation email was sent recently. Please wait a moment and try again.' })
+      }
+      if (result.status === 'failed') {
+        return reply.status(502).send({ error: 'The confirmation email could not be sent. Please try again later.' })
+      }
+
+      log.info('Email change requested — waiting for confirmation', { userId: req.userId, email: maskEmail(newEmail) })
+      // `user` is unchanged on purpose: the address changes only after the link is opened
+      return reply.send({ status: 'confirmation_sent', pendingEmail: newEmail, user: current })
     })
 
     // Update password
@@ -550,7 +695,7 @@ export async function registerAuthRoutes(app: FastifyInstance) {
       // If the room has a password, verify it before granting membership
       if (invite.password_hash) {
         const { password } = (req.body ?? {}) as { password?: string }
-        if (!password) {
+        if (typeof password !== 'string' || !password) {
           return reply.status(403).send({ error: 'This room requires a password', requiresPassword: true })
         }
         const valid = await bcrypt.compare(password, invite.password_hash)
@@ -559,14 +704,18 @@ export async function registerAuthRoutes(app: FastifyInstance) {
         }
       }
 
-      const existingRole = dbGetMemberRole(req.userId, invite.room_id)
-      if (!existingRole) {
-        dbAddRoomMember(req.userId, invite.room_id, 'viewer')
-        log.info('User joined via invite', { userId: req.userId, roomId: invite.room_id })
+      const result = dbAcceptInvite(token, req.userId, req.sessionToken, invite.password_hash)
+      if (result.status === 'unauthorized') {
+        return reply.status(401).send({ error: 'Invalid session' })
       }
-      dbDeleteInvite(token)
-
-      return reply.send({ roomId: invite.room_id, roomName: invite.room_name ?? null })
+      if (result.status === 'invalid') {
+        return reply.status(404).send({ error: 'Invite link not found or expired' })
+      }
+      if (result.status === 'password_changed') {
+        return reply.status(409).send({ error: 'Room password changed. Please try again.' })
+      }
+      log.info('Invite accepted', { userId: req.userId, roomId: result.roomId })
+      return reply.send({ roomId: result.roomId, roomName: result.roomName ?? null })
     })
   })
 }

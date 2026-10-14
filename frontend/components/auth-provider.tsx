@@ -13,13 +13,26 @@ export type User = {
   avatar?: string | null
 }
 
+/** Returned by signup: the account exists but its email address still has to be confirmed. */
+export type PendingVerification = {
+  email: string
+  emailSent: boolean
+  reason?: "cooldown" | "hourly" | "daily" | "failed"
+}
+
+export type VerifyEmailResult =
+  | { status: "verified"; purpose: "signup" | "change"; email: string }
+  | { status: "expired" | "invalid" | "taken" | "error" }
+
 type AuthContextValue = {
   user: User | null
   ready: boolean
-  login: (email: string, password: string) => Promise<{ error?: string }>
-  signup: (name: string, email: string, password: string) => Promise<{ error?: string }>
+  login: (email: string, password: string) => Promise<{ error?: string; code?: string }>
+  signup: (name: string, email: string, password: string) => Promise<{ error?: string; pending?: PendingVerification }>
   logout: () => void
   updateUser: (u: User) => void
+  verifyEmail: (token: string) => Promise<VerifyEmailResult>
+  resendVerification: (email: string) => Promise<{ error?: string }>
 }
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:45032"
@@ -47,7 +60,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .finally(() => setReady(true))
   }, [])
 
-  async function login(email: string, password: string): Promise<{ error?: string }> {
+  async function login(email: string, password: string): Promise<{ error?: string; code?: string }> {
     try {
       const res = await fetch(`${BACKEND_URL}/auth/login`, {
         method: "POST",
@@ -56,7 +69,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         body: JSON.stringify({ email, password }),
       })
       const data = await res.json()
-      if (!res.ok) return { error: data.error ?? "Login failed" }
+      if (!res.ok) return { error: data.error ?? "Login failed", code: data.code }
       setUser({ ...data.user, avatar: sanitizeAvatar(data.user.avatar) })
       return {}
     } catch {
@@ -64,7 +77,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }
 
-  async function signup(name: string, email: string, password: string): Promise<{ error?: string }> {
+  async function signup(name: string, email: string, password: string): Promise<{ error?: string; pending?: PendingVerification }> {
     try {
       const res = await fetch(`${BACKEND_URL}/auth/signup`, {
         method: "POST",
@@ -74,6 +87,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       })
       const data = await res.json()
       if (!res.ok) return { error: data.error ?? "Signup failed" }
+      // The account must be confirmed by email before it can be used: there is no session yet
+      if (data.status === "verification_required") {
+        return { pending: { email: data.email, emailSent: !!data.emailSent, reason: data.reason } }
+      }
+      // Older backend (no email confirmation): the user is signed in right away
       setUser({ ...data.user, avatar: sanitizeAvatar(data.user.avatar) })
       return {}
     } catch {
@@ -98,8 +116,46 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(u)
   }
 
+  async function verifyEmail(token: string): Promise<VerifyEmailResult> {
+    try {
+      const res = await fetch(`${BACKEND_URL}/auth/verify-email`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ token }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (res.ok && data.status === "verified") {
+        return { status: "verified", purpose: data.purpose === "change" ? "change" : "signup", email: String(data.email ?? "") }
+      }
+      if (data.code === "token_expired") return { status: "expired" }
+      if (data.code === "email_taken") return { status: "taken" }
+      if (data.code === "invalid_token") return { status: "invalid" }
+      return { status: "error" }
+    } catch {
+      return { status: "error" }
+    }
+  }
+
+  async function resendVerification(email: string): Promise<{ error?: string }> {
+    try {
+      const res = await fetch(`${BACKEND_URL}/auth/resend-verification`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ email }),
+      })
+      if (res.status === 429) return { error: "Too many attempts. Please wait a minute and try again." }
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) return { error: data.error ?? "Could not send the email. Please try again." }
+      return {}
+    } catch {
+      return { error: "Cannot connect to server" }
+    }
+  }
+
   return (
-    <AuthContext.Provider value={{ user, ready, login, signup, logout, updateUser }}>
+    <AuthContext.Provider value={{ user, ready, login, signup, logout, updateUser, verifyEmail, resendVerification }}>
       {children}
     </AuthContext.Provider>
   )

@@ -240,6 +240,21 @@ Open [http://localhost:3000](http://localhost:3000).
 
 ### Production build
 
+Execution and formatting share a limit of 4 active jobs per backend process and
+1 per authenticated account (across tabs and sessions). Guests share a limit by
+transport peer IP; forwarded headers are not trusted for this key. Excess jobs
+are rejected immediately and may be retried after completion. Disconnecting does
+not release an active job's slot before execution and cleanup finish. Socket.IO
+connections are capped at 256 per process and 8 per account/guest IP. Docker
+execution, formatter and warm-pool containers each have a limit of 128 processes.
+The idle warm pool remains bounded to 2 containers per interpreted language.
+These in-memory limits assume a single backend process; multiple workers or
+replicas require a shared admission controller to enforce deployment-wide limits.
+
+Install with `npm ci --include=dev` in each workspace before building. The frontend
+needs shadcn's CSS during the build; its CLI is a development dependency. After
+building, run `npm prune --omit=dev` in each workspace before starting production.
+
 ```bash
 # Backend
 cd backend && npm run build && npm start
@@ -247,6 +262,14 @@ cd backend && npm run build && npm start
 # Frontend
 cd frontend && npm run build && npm start
 ```
+
+Dependency checks: run `npm audit --omit=dev` in both workspaces (and `pnpm audit
+--prod` if using the frontend's pnpm lockfile). As of 2026-10-13 these production
+checks report no known vulnerabilities. The full audit still reports
+[GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm) in
+`braces`, through the development tools Nodemon and shadcn. No patched version
+is published; avoid feeding untrusted glob patterns into those tools. Do not use
+`npm audit fix --force` to downgrade them to obsolete versions.
 
 ---
 
@@ -266,6 +289,14 @@ NODE_ENV=development
 # Frontend origin — update to your domain in production
 # Default if unset: http://localhost:3000
 CORS_ORIGIN=
+
+# Socket.IO also checks this exact origin at handshake time (including WebSocket).
+# Specify scheme + host + optional port, with no trailing slash or path.
+# WebSocket clients must send Origin; polling may use a matching Referer if Origin is absent.
+
+# Comma-separated trusted reverse-proxy IPs/CIDRs. Defaults to localhost only.
+# Set this explicitly for a proxy in another container or host; empty disables proxy trust.
+TRUSTED_PROXIES=127.0.0.1,::1
 ```
 
 > The frontend has no `.env` file — it connects to the backend at the default `http://localhost:3001`.

@@ -126,6 +126,112 @@ function captureKnockTimers(t) {
   return timers
 }
 
+test('execution capacity is shared across tabs, formatting and reconnects', async t => {
+  const executor = require('../src/executor')
+  let finish
+  let calls = 0
+  t.mock.method(executor, 'executeCode', () => {
+    calls++
+    return new Promise(resolve => { finish = () => resolve({ output: '', error: '', exitCode: 0, duration: 1 }) })
+  })
+  t.after(() => finish?.())
+  const owner = user(), roomId = room(owner)
+  const first = await clientFor(t, owner)
+  const second = await clientFor(t, owner)
+  await join(first, roomId)
+  await join(second, roomId)
+  const started = nextEvent(first, ['run-started'])
+  first.emit('run-code', { language: 'c', code: 'code' })
+  await started
+  const denied = nextEvent(second, ['run-result'])
+  second.emit('run-code', { language: 'c', code: 'code' })
+  assert.match((await denied).data.error, /capacity/)
+  const formatDenied = nextEvent(second, ['format-result'])
+  second.emit('format-code', { language: 'go', code: 'code' })
+  assert.match((await formatDenied).data.error, /capacity/)
+  first.disconnect()
+  const reconnected = await clientFor(t, owner)
+  await join(reconnected, roomId)
+  const stillDenied = nextEvent(reconnected, ['run-result'])
+  reconnected.emit('run-code', { language: 'c', code: 'code' })
+  assert.match((await stillDenied).data.error, /capacity/)
+  assert.equal(calls, 1)
+  finish()
+  await new Promise(resolve => setImmediate(resolve))
+  const resumed = nextEvent(reconnected, ['run-started'])
+  reconnected.emit('run-code', { language: 'c', code: 'code' })
+  await resumed
+  const done = nextEvent(reconnected, ['run-result'])
+  finish()
+  await done
+  assert.equal(calls, 2)
+})
+
+test('global execution capacity rejects a fifth account and recovers after completion', async t => {
+  const pending = []
+  t.mock.method(require('../src/executor'), 'executeCode', () => new Promise(resolve => pending.push(resolve)))
+  const result = { output: '', error: '', exitCode: 0, duration: 1 }
+  t.after(() => pending.forEach(resolve => resolve(result)))
+  const sockets = []
+  for (let i = 0; i < 5; i++) {
+    const owner = user(), roomId = room(owner)
+    const client = await clientFor(t, owner)
+    await join(client, roomId)
+    sockets.push(client)
+    const response = nextEvent(client, [i < 4 ? 'run-started' : 'run-result'])
+    client.emit('run-code', { language: 'c', code: 'code' })
+    const received = await response
+    if (i === 4) assert.match(received.data.error, /capacity/)
+  }
+  assert.equal(pending.length, 4)
+  const completed = nextEvent(sockets[0], ['run-result'])
+  pending[0](result)
+  await completed
+  const started = nextEvent(sockets[4], ['run-started'])
+  sockets[4].emit('run-code', { language: 'c', code: 'code' })
+  await started
+  assert.equal(pending.length, 5)
+  const completions = sockets.slice(1).map(socket => nextEvent(socket, ['run-result']))
+  pending.slice(1).forEach(resolve => resolve(result))
+  await Promise.all(completions)
+})
+
+test('failed execution releases capacity for a new request', async t => {
+  const owner = user(), roomId = room(owner)
+  const client = await clientFor(t, owner)
+  await join(client, roomId)
+  const executor = require('../src/executor')
+  t.mock.method(executor, 'executeCode', async () => { throw new Error('simulated failure') })
+  const failure = nextEvent(client, ['server-error'])
+  client.emit('run-code', { language: 'c', code: 'code' })
+  await failure
+  t.mock.method(executor, 'executeCode', async () => ({ output: 'ok', error: '', exitCode: 0, duration: 1 }))
+  const success = nextEvent(client, ['run-result'])
+  client.emit('run-code', { language: 'c', code: 'code' })
+  assert.equal((await success).data.output, 'ok')
+})
+
+test('connection cap applies across sessions and frees a slot after disconnect', async t => {
+  const owner = user()
+  const open = []
+  for (let i = 0; i < 8; i++) open.push(await clientFor(t, owner))
+  const token = createSession(owner).token
+  const excess = connectClient(address, {
+    autoConnect: false, reconnection: false, transports: ['websocket'],
+    extraHeaders: { Cookie: `${SESSION_COOKIE_NAME}=${token}` },
+  })
+  t.after(() => excess.disconnect())
+  const denied = nextEvent(excess, ['error'])
+  excess.connect()
+  assert.match((await denied).data.message, /Too many open connections/)
+  const serverSocket = io.sockets.sockets.get(open[0].id)
+  const disconnected = new Promise(resolve => serverSocket.once('disconnect', resolve))
+  open[0].disconnect()
+  await disconnected
+  const replacement = await clientFor(t, owner)
+  assert.equal(replacement.connected, true)
+})
+
 test('creating a new room atomically creates its owner', () => {
   const creator = user()
   const roomId = randomUUID()

@@ -1,7 +1,7 @@
 "use client"
 
 import type React from "react"
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { useParams, useRouter } from "next/navigation"
 import { useAuth } from "@/components/auth-provider"
 import { useSocket } from "@/lib/useSocket"
@@ -42,7 +42,7 @@ const CODE_SYNC_DEBOUNCE_MS = 120
 const CODE_SYNC_MAX_WAIT_MS = 400
 const CURSOR_THROTTLE_MS = 80
 
-import { computeTextPatch, applyTextPatch } from "@/lib/textPatch"
+import { computeTextPatch, applyTextPatch, rebaseLocalEdit } from "@/lib/textPatch"
 import type { TextPatch } from "@/lib/textPatch"
 
 /* ------------------------------------------------------------------ */
@@ -163,6 +163,7 @@ export default function CoderoomPage() {
   const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const maxSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pendingSyncRef = useRef<{ fileId: string; content: string } | null>(null)
+  const pendingSelectionRef = useRef<{ text: string; start: number; end: number } | null>(null)
   const cursorThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastCursorEmitRef = useRef(0)
   const highlightCacheRef = useRef<Record<string, HighlightCache>>({})
@@ -203,6 +204,7 @@ export default function CoderoomPage() {
       setActiveContent(code)
       lastSyncedContent.current[activeIdRef.current] = code
     },
+    applyRemoteContent,
   })
 
   useEffect(() => { setLockHasPassword(roomHasPassword) }, [roomHasPassword])
@@ -318,6 +320,46 @@ export default function CoderoomPage() {
       maxSyncTimerRef.current = setTimeout(flushCodeSync, CODE_SYNC_MAX_WAIT_MS)
     }
   }
+
+  // A remote update arrived for the open file. Keep the keystrokes that were not sent yet
+  // (rebased on top of the remote text) instead of overwriting them, and keep the caret in place.
+  function applyRemoteContent(fileId: string, previousSynced: string | undefined, remote: string) {
+    if (activeIdRef.current !== fileId) return
+    const ta = textareaRef.current
+    const local = ta ? ta.value : remote
+
+    if (previousSynced === undefined) {
+      pendingSyncRef.current = null
+      setActiveContent(remote)
+      return
+    }
+
+    const merged = rebaseLocalEdit(previousSynced, local, remote)
+    if (merged.conflict) {
+      // Overlapping edits: the remote one wins, the unsent local keystrokes are dropped
+      pendingSyncRef.current = null
+    } else if (pendingSyncRef.current?.fileId === fileId) {
+      pendingSyncRef.current = { fileId, content: merged.text }
+    }
+    if (ta && merged.text !== local) {
+      pendingSelectionRef.current = {
+        text: merged.text,
+        start: merged.mapPosition(ta.selectionStart),
+        end: merged.mapPosition(ta.selectionEnd),
+      }
+    }
+    setActiveContent(merged.text)
+  }
+
+  useLayoutEffect(() => {
+    const sel = pendingSelectionRef.current
+    if (!sel) return
+    pendingSelectionRef.current = null
+    const ta = textareaRef.current
+    if (!ta || ta.value !== sel.text || document.activeElement !== ta) return
+    ta.setSelectionRange(sel.start, sel.end)
+    updateLocalCursor()
+  }, [activeContent])
 
   useEffect(() => {
     return () => {

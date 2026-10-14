@@ -21,6 +21,7 @@ const csp = [
 
 const nextConfig = {
   devIndicators: false,
+  allowedDevOrigins: ['coderoom.rg-dev.lat'],
   images: {
     unoptimized: true,
   },

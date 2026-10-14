@@ -109,12 +109,39 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_chat_messages_room_id ON chat_messages(room_id);
+
+  -- One-time tokens sent by email (signup confirmation / email change confirmation).
+  -- Only the SHA-256 hash of the token is stored. Rows are kept after use (used_at) so that
+  -- the per-email and daily sending limits keep counting; they are purged by created_at.
+  CREATE TABLE IF NOT EXISTS email_verifications (
+    token_hash TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    email TEXT NOT NULL,
+    purpose TEXT NOT NULL CHECK (purpose IN ('signup', 'change')),
+    expires_at INTEGER NOT NULL,
+    used_at INTEGER,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+  );
+  CREATE INDEX IF NOT EXISTS idx_email_verifications_user ON email_verifications(user_id);
+  CREATE INDEX IF NOT EXISTS idx_email_verifications_email ON email_verifications(email, created_at);
+  CREATE INDEX IF NOT EXISTS idx_email_verifications_created ON email_verifications(created_at);
 `)
 
 // Migration: add `avatar` column to users table if it doesn't exist yet
 const userColumns = db.prepare(`PRAGMA table_info(users)`).all() as { name: string }[]
 if (!userColumns.some((c) => c.name === 'avatar')) {
   db.exec(`ALTER TABLE users ADD COLUMN avatar TEXT`)
+}
+
+// Migration: add `email_verified_at` to users. Accounts that already exist were created before
+// email verification existed, so they are marked as verified. The ALTER and the UPDATE run in a
+// single transaction and only when the column is being created: this must never run again, or
+// every restart would mark new, unverified accounts as verified.
+if (!userColumns.some((c) => c.name === 'email_verified_at')) {
+  db.transaction(() => {
+    db.exec(`ALTER TABLE users ADD COLUMN email_verified_at INTEGER`)
+    db.exec(`UPDATE users SET email_verified_at = created_at WHERE email_verified_at IS NULL`)
+  })()
 }
 
 // Migration: add `name` and `password_hash` columns to rooms table if they don't exist yet
@@ -214,16 +241,53 @@ function getDeleteFilesByIdsStmt(count: number) {
 
 // Users
 const stmtInsertUser = db.prepare(`
-  INSERT INTO users (id, name, email, password_hash) VALUES (?, ?, ?, ?)
+  INSERT INTO users (id, name, email, password_hash, email_verified_at) VALUES (?, ?, ?, ?, ?)
 `)
 const stmtSelectUserByEmail = db.prepare('SELECT * FROM users WHERE email = ?')
-const stmtSelectUserById = db.prepare('SELECT id, name, email, avatar, created_at FROM users WHERE id = ?')
+const stmtSelectUserById = db.prepare('SELECT id, name, email, avatar, created_at, email_verified_at FROM users WHERE id = ?')
 const stmtSetUserAvatar = db.prepare('UPDATE users SET avatar = ? WHERE id = ?')
 const stmtClearUserAvatar = db.prepare('UPDATE users SET avatar = NULL WHERE id = ?')
 const stmtUpdateUserName = db.prepare('UPDATE users SET name = ? WHERE id = ?')
 const stmtUpdateUserEmail = db.prepare('UPDATE users SET email = ? WHERE id = ?')
 const stmtUpdateUserPassword = db.prepare('UPDATE users SET password_hash = ? WHERE id = ?')
+const stmtPasswordMatches = db.prepare('SELECT 1 FROM users WHERE id = ? AND password_hash = ?')
 const stmtDeleteUserById = db.prepare('DELETE FROM users WHERE id = ?')
+const stmtMarkUserVerified = db.prepare('UPDATE users SET email_verified_at = ? WHERE id = ?')
+const stmtReplaceUnverifiedUser = db.prepare(`
+  UPDATE users SET name = ?, password_hash = ?, created_at = unixepoch()
+  WHERE id = ? AND email_verified_at IS NULL
+`)
+const stmtSelectStaleUnverifiedUsers = db.prepare(
+  'SELECT id FROM users WHERE email_verified_at IS NULL AND created_at < ?'
+)
+
+const stmtInsertEmailVerification = db.prepare(`
+  INSERT INTO email_verifications (token_hash, user_id, email, purpose, expires_at, created_at)
+  VALUES (?, ?, ?, ?, ?, ?)
+`)
+const stmtGetEmailVerification = db.prepare(`
+  SELECT token_hash, user_id, email, purpose, expires_at, used_at
+  FROM email_verifications WHERE token_hash = ?
+`)
+const stmtMarkEmailVerificationUsed = db.prepare(
+  'UPDATE email_verifications SET used_at = ? WHERE token_hash = ?'
+)
+const stmtSupersedePendingChanges = db.prepare(`
+  UPDATE email_verifications SET used_at = ?
+  WHERE user_id = ? AND purpose = 'change' AND used_at IS NULL
+`)
+const stmtClosePendingVerifications = db.prepare(`
+  UPDATE email_verifications SET used_at = ? WHERE user_id = ? AND used_at IS NULL
+`)
+const stmtCountVerificationsForEmail = db.prepare(
+  'SELECT COUNT(*) AS n, MAX(created_at) AS last_at FROM email_verifications WHERE email = ? AND created_at >= ?'
+)
+const stmtCountVerificationsSince = db.prepare(
+  'SELECT COUNT(*) AS n FROM email_verifications WHERE created_at >= ?'
+)
+const stmtDeleteOldEmailVerifications = db.prepare(
+  'DELETE FROM email_verifications WHERE created_at < ?'
+)
 const stmtSelectOwnedRooms = db.prepare(
   `SELECT room_id FROM room_members WHERE user_id = ? AND role = 'owner'`
 )
@@ -234,6 +298,11 @@ const stmtDeleteNonOwnerMemberships = db.prepare(
 // Sessions
 const stmtInsertSession = db.prepare(`
   INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)
+`)
+const stmtInsertSessionForCredentials = db.prepare(`
+  INSERT INTO sessions (id, user_id, expires_at)
+  SELECT ?, id, ? FROM users
+  WHERE id = ? AND email = ? AND password_hash = ? AND email_verified_at IS NOT NULL
 `)
 const stmtSelectSession = db.prepare('SELECT id, user_id, created_at, expires_at FROM sessions WHERE id = ?')
 const stmtDeleteSessionById = db.prepare('DELETE FROM sessions WHERE id = ?')
@@ -427,19 +496,25 @@ export function dbRoomExists(roomId: string): boolean {
 /* User queries                                                        */
 /* ------------------------------------------------------------------ */
 
-export function dbCreateUser(id: string, name: string, email: string, passwordHash: string) {
-  return stmtInsertUser.run(id, name, email, passwordHash)
+export function dbCreateUser(
+  id: string,
+  name: string,
+  email: string,
+  passwordHash: string,
+  emailVerifiedAt: number | null = null,
+) {
+  return stmtInsertUser.run(id, name, email, passwordHash, emailVerifiedAt)
 }
 
 export function dbGetUserByEmail(email: string) {
   return stmtSelectUserByEmail.get(email) as {
-    id: string; name: string; email: string; password_hash: string
+    id: string; name: string; email: string; password_hash: string; email_verified_at: number | null
   } | undefined
 }
 
 export function dbGetUserById(id: string) {
   return stmtSelectUserById.get(id) as {
-    id: string; name: string; email: string; avatar: string | null; created_at: number
+    id: string; name: string; email: string; avatar: string | null; created_at: number; email_verified_at: number | null
   } | undefined
 }
 
@@ -460,7 +535,108 @@ export function dbUpdateUserEmail(id: string, email: string) {
 }
 
 export function dbUpdateUserPassword(id: string, passwordHash: string) {
-  stmtUpdateUserPassword.run(passwordHash, id)
+  db.transaction(() => {
+    stmtUpdateUserPassword.run(passwordHash, id)
+    stmtSupersedePendingChanges.run(Math.floor(Date.now() / 1000), id)
+  })()
+}
+
+/* ------------------------------------------------------------------ */
+/* Email verification                                                  */
+/* ------------------------------------------------------------------ */
+
+export type EmailVerificationPurpose = 'signup' | 'change'
+
+export type EmailVerificationResult =
+  | { status: 'ok'; userId: string; email: string; purpose: EmailVerificationPurpose }
+  | { status: 'invalid' | 'expired' | 'conflict' }
+
+/** Stores the hash of a one-time token. A new 'change' request supersedes the user's older pending ones. */
+export function dbCreateEmailVerification(
+  tokenHash: string,
+  userId: string,
+  email: string,
+  purpose: EmailVerificationPurpose,
+  expiresAt: number,
+  createdAt: number = Math.floor(Date.now() / 1000),
+  expectedPasswordHash?: string,
+) {
+  return db.transaction(() => {
+    // Serialize this check with password updates, including other DB connections.
+    if (expectedPasswordHash !== undefined && !stmtPasswordMatches.get(userId, expectedPasswordHash)) return false
+    if (purpose === 'change') stmtSupersedePendingChanges.run(createdAt, userId)
+    stmtInsertEmailVerification.run(tokenHash, userId, email, purpose, expiresAt, createdAt)
+    return true
+  }).immediate()
+}
+
+/**
+ * Consumes a token atomically. On success the email is marked as verified (and, for a 'change'
+ * token, the user's email is updated) and every other pending token of that user is closed.
+ *  - invalid:  unknown token, already used, or no longer matching the account
+ *  - expired:  token past its expiry
+ *  - conflict: the new email was taken by another account in the meantime
+ */
+export function dbConsumeEmailVerification(tokenHash: string): EmailVerificationResult {
+  const tx = db.transaction((hash: string): EmailVerificationResult => {
+    const now = Math.floor(Date.now() / 1000)
+    const row = stmtGetEmailVerification.get(hash) as {
+      user_id: string; email: string; purpose: EmailVerificationPurpose; expires_at: number; used_at: number | null
+    } | undefined
+    if (!row || row.used_at !== null) return { status: 'invalid' }
+    if (row.expires_at <= now) return { status: 'expired' }
+
+    const user = stmtSelectUserById.get(row.user_id) as { email: string } | undefined
+    if (!user) return { status: 'invalid' }
+
+    if (row.purpose === 'signup') {
+      if (user.email !== row.email) return { status: 'invalid' }
+    } else {
+      const owner = stmtSelectUserByEmail.get(row.email) as { id: string } | undefined
+      if (owner && owner.id !== row.user_id) return { status: 'conflict' }
+      stmtUpdateUserEmail.run(row.email, row.user_id)
+    }
+
+    stmtMarkUserVerified.run(now, row.user_id)
+    stmtMarkEmailVerificationUsed.run(now, hash)
+    stmtClosePendingVerifications.run(now, row.user_id)
+    return { status: 'ok', userId: row.user_id, email: row.email, purpose: row.purpose }
+  })
+  return tx(tokenHash)
+}
+
+/** How many verification emails were created for this address since `sinceSec`, and when the last one was. */
+export function dbGetEmailVerificationStats(email: string, sinceSec: number): { count: number; lastAt: number | null } {
+  const row = stmtCountVerificationsForEmail.get(email, sinceSec) as { n: number; last_at: number | null }
+  return { count: row.n, lastAt: row.last_at }
+}
+
+/** How many verification emails were created by anyone since `sinceSec` (daily sending cap). */
+export function dbCountEmailVerificationsSince(sinceSec: number): number {
+  return (stmtCountVerificationsSince.get(sinceSec) as { n: number }).n
+}
+
+/** Re-signup with the email of an account that never confirmed it: new name/password, fresh 48 h window. */
+export function dbReplaceUnverifiedUser(userId: string, name: string, passwordHash: string): boolean {
+  return db.transaction(() => {
+    if (stmtReplaceUnverifiedUser.run(name, passwordHash, userId).changes === 0) return false
+    // An earlier email must never confirm credentials supplied by a later signup.
+    // Keep the rows for sending limits, and revoke them even if the new email cannot be sent.
+    stmtClosePendingVerifications.run(Math.floor(Date.now() / 1000), userId)
+    return true
+  })()
+}
+
+/** Deletes accounts that were never verified and are older than `olderThanSec`. Returns how many. */
+export function dbDeleteStaleUnverifiedUsers(olderThanSec: number): number {
+  const ids = stmtSelectStaleUnverifiedUsers.all(olderThanSec) as { id: string }[]
+  for (const { id } of ids) dbDeleteUser(id)
+  return ids.length
+}
+
+/** Removes verification rows created before `createdBeforeSec`. Returns how many. */
+export function dbDeleteOldEmailVerifications(createdBeforeSec: number): number {
+  return stmtDeleteOldEmailVerifications.run(createdBeforeSec).changes
 }
 
 export function dbGetOwnedRooms(userId: string): string[] {
@@ -559,6 +735,20 @@ export function dbCreateSession(token: string, userId: string, expiresAt: number
   stmtPruneUserSessions.run(userId, userId)
 }
 
+/** Insert only if the credentials checked asynchronously still belong to this verified account. */
+export function dbCreateSessionForCredentials(
+  token: string, userId: string, expiresAt: number, email: string, passwordHash: string,
+): boolean {
+  return db.transaction(() => {
+    // The check is part of the write, so another DB connection cannot replace credentials
+    // between validating them and creating the session.
+    const inserted = stmtInsertSessionForCredentials.run(token, expiresAt, userId, email, passwordHash)
+    if (inserted.changes === 0) return false
+    stmtPruneUserSessions.run(userId, userId)
+    return true
+  })()
+}
+
 export function dbGetSession(token: string) {
   return stmtSelectSession.get(token) as {
     id: string; user_id: string; created_at: number; expires_at: number
@@ -618,6 +808,28 @@ export function dbGetInvite(token: string) {
 
 export function dbDeleteInvite(token: string) {
   stmtDeleteInvite.run(token)
+}
+
+/** Revalidate and consume the invitation together with membership creation. */
+export function dbAcceptInvite(
+  token: string, userId: string, sessionToken: string, expectedPasswordHash: string | null,
+): { status: 'ok'; roomId: string; roomName: string | null }
+  | { status: 'invalid' } | { status: 'unauthorized' } | { status: 'password_changed' } {
+  return db.transaction(() => {
+    // Reserve the write lock before reading, also serializing other DB connections.
+    const session = dbGetSession(sessionToken)
+    if (!session || session.user_id !== userId || session.expires_at <= Math.floor(Date.now() / 1000)) {
+      return { status: 'unauthorized' as const }
+    }
+    const invite = dbGetInvite(token)
+    if (!invite) return { status: 'invalid' as const }
+    if (invite.password_hash !== expectedPasswordHash) return { status: 'password_changed' as const }
+
+    stmtDeleteInvite.run(token)
+    // The upsert refreshes last_seen but preserves any existing owner/editor role.
+    stmtUpsertRoomMember.run(userId, invite.room_id, 'viewer')
+    return { status: 'ok' as const, roomId: invite.room_id, roomName: invite.room_name }
+  }).immediate()
 }
 
 export function dbDeleteExpiredInvites() {

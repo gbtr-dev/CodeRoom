@@ -159,6 +159,11 @@ function ErrLine({ msg }: { msg: string | null }) {
   return <p className="flex items-center gap-1.5 text-[12px] text-[#f87171]">{msg}</p>
 }
 
+function NoticeLine({ msg }: { msg: string | null }) {
+  if (!msg) return null
+  return <p role="status" className="text-[12px] leading-relaxed text-[#86efac]">{msg}</p>
+}
+
 /* ──────────────────────────────────────────────
    Page
 ────────────────────────────────────────────── */
@@ -184,6 +189,7 @@ export default function SettingsPage() {
   const [email, setEmail] = useState("")
   const [emailPassword, setEmailPassword] = useState("")
   const [emailErr, setEmailErr] = useState<string | null>(null)
+  const [emailNotice, setEmailNotice] = useState<string | null>(null)
 
   // Password
   const [currentPw, setCurrentPw] = useState("")
@@ -264,11 +270,20 @@ export default function SettingsPage() {
 
   async function saveEmail(): Promise<boolean> {
     setEmailErr(null)
+    setEmailNotice(null)
     try {
       const res = await fetch(`${BACKEND_URL}/auth/me/email`, { method: "PUT", headers: { "Content-Type": "application/json" }, credentials: "include", body: JSON.stringify({ email: email.trim(), currentPassword: emailPassword }) })
       const data = await res.json()
       if (!res.ok) { setEmailErr(data.error ?? "Failed to update email"); return false }
-      updateUser(data.user); setEmailPassword(""); return true
+      setEmailPassword("")
+      if (data.status === "confirmation_sent") {
+        // The address only changes once the link sent to the new one is opened
+        setEmailNotice(`We sent a confirmation link to ${data.pendingEmail}. Your email will change when you open it; until then you keep signing in with ${user?.email ?? "your current address"}.`)
+        if (user) setEmail(user.email)
+        return true
+      }
+      updateUser(data.user)   // older backend: the change was applied immediately
+      return true
     } catch { setEmailErr("Cannot connect to server"); return false }
   }
 
@@ -519,13 +534,14 @@ export default function SettingsPage() {
                 subtitle={`Currently: ${user.email}`}
               />
               <div className="flex flex-col gap-3">
-                <FloatInput id="email" label="Email address" type="email" value={email} onChange={e => { setEmail(e.target.value); setEmailErr(null) }} />
+                <FloatInput id="email" label="Email address" type="email" value={email} onChange={e => { setEmail(e.target.value); setEmailErr(null); setEmailNotice(null) }} />
                 <FloatInput id="email-pw" label="Current password" type="password" value={emailPassword}
                   onChange={e => { setEmailPassword(e.target.value); setEmailErr(null) }}
                   onKeyDown={(e: React.KeyboardEvent) => { if (e.key === "Enter") (e.currentTarget as HTMLElement).blur() }}
                 />
                 <ErrLine msg={emailErr} />
-                <SaveButton onSave={saveEmail} disabled={!email.trim() || !emailPassword || email.trim() === user.email} label="Save email" />
+                <NoticeLine msg={emailNotice} />
+                <SaveButton onSave={saveEmail} disabled={!email.trim() || !emailPassword || email.trim() === user.email} label="Send confirmation link" />
               </div>
             </Section>
           </Reveal>

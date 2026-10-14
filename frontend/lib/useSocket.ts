@@ -45,6 +45,7 @@ export interface UseSocketCallbacks {
   outputEndRef: { current: HTMLDivElement | null }
   setFormatting: (v: boolean) => void
   applyFormat: (code: string) => void
+  applyRemoteContent: (fileId: string, previousSynced: string | undefined, content: string) => void
 }
 
 export interface UseSocketResult {
@@ -225,14 +226,13 @@ export function useSocket(
 
     socket.on("code-update", ({ fileId, content, fromSocketId }: { fileId: string; content: string; fromSocketId?: string }) => {
 
+      const previousSynced = cb.current.lastSyncedContent.current[fileId]
       cb.current.lastSyncedContent.current[fileId] = content
 
       if (fromSocketId === socket.id) return
       cb.current.setNodes((prev) => prev.map((n) => (n.id === fileId ? { ...n, content } : n)))
-      cb.current.setActiveContent((cur) => {
-        const aid = cb.current.activeIdRef.current
-        return aid === fileId ? content : cur
-      })
+      // Merge with any local edit not sent yet instead of overwriting the editor
+      cb.current.applyRemoteContent(fileId, previousSynced, content)
     })
 
     socket.on("code-patch", ({ fileId, start, deleteCount, insert }: TextPatch & { fileId: string }) => {

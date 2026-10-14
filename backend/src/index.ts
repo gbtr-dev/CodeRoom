@@ -5,6 +5,7 @@ import cookie from '@fastify/cookie'
 import helmet from '@fastify/helmet'
 import rateLimit from '@fastify/rate-limit'
 import { Server } from 'socket.io'
+import { socketOptions } from './socketOptions'
 import { registerSocketHandlers } from './socket'
 import { registerAuthRoutes } from './auth'
 import { csrfOriginCheck } from './csrf'
@@ -12,10 +13,13 @@ import { flushAllRoomContent } from './rooms'
 import { dbDeleteExpiredSessions, dbDeleteExpiredLoginAttempts, dbDeleteExpiredInvites } from './db'
 import { createLogger } from './logger'
 import { initContainerPool, shutdownPool } from './executor'
+import { assertMailConfig } from './mail'
+import { runEmailVerificationCleanup } from './emailVerification'
+import { trustedProxies } from './trustedProxies'
 
 
 const log = createLogger('SERVER')
-const app = Fastify({ logger: false, trustProxy: 1 })
+const app = Fastify({ logger: false, trustProxy: trustedProxies() })
 
 const NODE_ENV = process.env.NODE_ENV ?? 'development'
 
@@ -24,7 +28,18 @@ if (NODE_ENV === 'production' && !process.env.CORS_ORIGIN) {
   process.exit(1)
 }
 
+// Email verification needs a working mail setup: in production the server must not start without it
+try {
+  assertMailConfig()
+} catch (err) {
+  console.error(`[SERVER] ${(err as Error).message} — avvio bloccato`)
+  process.exit(1)
+}
+
 const CORS_ORIGIN = process.env.CORS_ORIGIN ?? 'http://localhost:45031'
+
+// Port can be changed with PORT (e.g. to run a test copy next to the live backend); default unchanged
+const PORT = Number.parseInt(process.env.PORT ?? '', 10) || 45032
 
 app.register(cors, {
   origin: CORS_ORIGIN,
@@ -68,6 +83,11 @@ setInterval(() => {
     log.info('Pulizia periodica inviti scaduti', { deleted })
   }
 }, SESSION_CLEANUP_INTERVAL_MS).unref()
+
+// Accounts that never confirmed their email, and old verification tokens
+const EMAIL_VERIFICATION_CLEANUP_INTERVAL_MS = 60 * 60 * 1000 // 1 ora
+runEmailVerificationCleanup()
+setInterval(() => runEmailVerificationCleanup(), EMAIL_VERIFICATION_CLEANUP_INTERVAL_MS).unref()
 
 app.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
   try { done(null, JSON.parse(body as string)) }
@@ -138,19 +158,12 @@ process.on('SIGINT', () => shutdown('SIGINT'))
 process.on('SIGTERM', () => shutdown('SIGTERM'))
 
 
-app.listen({ port: 45032, host: '0.0.0.0' }, (err) => {
+app.listen({ port: PORT, host: '0.0.0.0' }, (err) => {
   if (err) { log.error('Errore avvio server', { error: String(err) }); process.exit(1) }
 
-  io = new Server(app.server, {
-    cors: {
-      origin: CORS_ORIGIN,
-      methods: ['GET', 'POST'],
-      credentials: true,
-    },
-    perMessageDeflate: { threshold: 1024 },
-  })
+  io = new Server(app.server, socketOptions(CORS_ORIGIN))
 
   registerSocketHandlers(io)
-  log.info('Backend avviato', { url: 'http://localhost:45032' })
+  log.info('Backend avviato', { url: `http://localhost:${PORT}` })
   initContainerPool().catch((err) => log.error('Errore init container pool', { error: String(err) }))
 })

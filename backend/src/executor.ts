@@ -1,4 +1,5 @@
 import { spawn } from 'child_process'
+import { randomUUID } from 'crypto'
 import { format as prettierFormat } from 'prettier'
 
 // Fail-fast: if Docker is reached over TCP, TLS must be explicitly enabled.
@@ -67,15 +68,22 @@ const POOL_SIZE = 2
 
 const pool = new Map<string, string[]>()
 
-function dockerCmd(args: string[]): Promise<string> {
+function dockerCmd(args: string[], timeoutMs = 10_000): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn('docker', args, { env: { ...process.env } })
     let out = ''
     let err = ''
+    const timer = setTimeout(() => {
+      reject(new Error('Docker operation timed out'))
+      child.kill('SIGKILL')
+    }, timeoutMs)
     child.stdout.on('data', (d: Buffer) => { out += d.toString() })
     child.stderr.on('data', (d: Buffer) => { err += d.toString() })
-    child.on('close', (code) => code === 0 ? resolve(out.trim()) : reject(new Error(err.trim())))
-    child.on('error', reject)
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      code === 0 ? resolve(out.trim()) : reject(new Error(err.trim()))
+    })
+    child.on('error', (error) => { clearTimeout(timer); reject(error) })
   })
 }
 
@@ -94,6 +102,7 @@ async function spawnWarmContainer(language: string): Promise<string | null> {
       '--memory',      '256m',
       '--memory-swap', '256m',
       '--cpus',        '0.5',
+      '--pids-limit',  '128',
       '--read-only',
       '--tmpfs',       '/tmp:size=256m',
       '--stop-timeout','5',
@@ -144,8 +153,36 @@ async function fillPool(language: string) {
   }
 }
 
-function killContainer(id: string) {
-  spawn('docker', ['rm', '-f', id], { env: { ...process.env } }).on('error', () => {})
+async function runManagedContainer(id: string, start: number, run: () => Promise<ExecResult>): Promise<ExecResult> {
+  let result: ExecResult = { output: '', error: '', exitCode: 1, duration: 0 }
+  try {
+    result = await run()
+  } catch (err) {
+    result.error = err instanceof Error ? err.message : String(err)
+  } finally {
+    try {
+      await dockerCmd(['rm', '-f', id])
+    } catch (err) {
+      // --rm containers may already have disappeared after a normal exit.
+      const message = err instanceof Error ? err.message : String(err)
+      if (!/No such container/i.test(message)) {
+        result.exitCode = 1
+        result.error += '\nContainer cleanup failed: ' + message
+      }
+    }
+    result.duration = Date.now() - start
+  }
+  return result
+}
+
+function runColdContainer(args: string[], stdin: string, start: number, timeoutMs: number): Promise<ExecResult> {
+  const id = `coderoom-run-${randomUUID()}`
+  return runManagedContainer(id, start, async () => {
+    // Create separately: a delayed create after a client timeout cannot start user code.
+    // The name is known before contacting Docker, including when the CLI fails.
+    await dockerCmd(['create', '--name', id, '-i', ...args], 60_000)
+    return runProcess('docker', ['start', '-a', '-i', id], stdin, start, timeoutMs)
+  })
 }
 
 async function acquireContainer(language: string): Promise<string | null> {
@@ -179,12 +216,10 @@ export async function executeCode(language: string, code: string, stdin?: string
   if (WARM_LANGUAGES.includes(language)) {
     const containerId = await acquireContainer(language)
     if (containerId) {
-      const result = await runProcess(
+      return runManagedContainer(containerId, start, () => runProcess(
         'docker', ['exec', '-i', '-e', `CODEROOM_CODE=${codeBase64}`, containerId, 'sh', '-c', shCmd],
         stdinPayload, start, timeoutMs
-      )
-      killContainer(containerId)
-      return result
+      ))
     }
   }
 
@@ -192,14 +227,13 @@ export async function executeCode(language: string, code: string, stdin?: string
   const envFlags: string[] = []
   for (const e of config.extraEnv ?? []) envFlags.push('-e', e)
 
-  return runProcess(
-    'docker',
+  return runColdContainer(
     [
-      'run', '--rm', '-i',
       '--network',     'none',
       '--memory',      '256m',
       '--memory-swap', '256m',
       '--cpus',        '0.5',
+      '--pids-limit',  '128',
       '--read-only',
       '--tmpfs',       '/tmp:size=256m',
       '--stop-timeout','5',
@@ -242,14 +276,13 @@ export async function formatCode(language: string, code: string): Promise<{ form
   // Go / Rust — gofmt e rustfmt sono già nell'immagine, nessun download
   const dockerFmt = DOCKER_FMTS[language]
   if (dockerFmt) {
-    const result = await runProcess(
-      'docker',
+    const result = await runColdContainer(
       [
-        'run', '--rm', '-i',
         '--network',     'none',
         '--memory',      '128m',
         '--memory-swap', '128m',
         '--cpus',        '0.5',
+        '--pids-limit',  '128',
         '--read-only',
         '--tmpfs',       '/tmp:size=64m',
         '--stop-timeout','5',
@@ -272,10 +305,12 @@ function runProcess(cmd: string, args: string[], stdin: string, start: number, t
     let finished = false
 
     const child = spawn(cmd, args, { env: { ...process.env } })
+    let timer: ReturnType<typeof setTimeout>
 
     const finish = (code: number) => {
       if (finished) return
       finished = true
+      clearTimeout(timer)
       resolve({
         output:   output.slice(0, MAX_OUTPUT).trim(),
         error:    error.slice(0, MAX_OUTPUT).trim(),
@@ -283,9 +318,6 @@ function runProcess(cmd: string, args: string[], stdin: string, start: number, t
         duration: Date.now() - start,
       })
     }
-
-    child.stdin.write(stdin, 'utf8')
-    child.stdin.end()
 
     child.stdout.on('data', (chunk: Buffer) => { if (output.length < MAX_OUTPUT) output += chunk.toString() })
     child.stderr.on('data', (chunk: Buffer) => { if (error.length < MAX_OUTPUT) error += chunk.toString() })
@@ -297,12 +329,20 @@ function runProcess(cmd: string, args: string[], stdin: string, start: number, t
       finish(1)
     })
 
-    setTimeout(() => {
+    child.stdin.on('error', (err: Error) => {
+      if (finished) return
+      error += '\nInput stream failed: ' + err.message
+      finish(1)
+      child.kill('SIGKILL')
+    })
+
+    timer = setTimeout(() => {
       if (!finished) {
-        child.kill('SIGKILL')
         error += '\nExecution timed out.'
         finish(1)
+        child.kill('SIGKILL')
       }
     }, timeoutMs)
+    child.stdin.end(stdin, 'utf8')
   })
 }

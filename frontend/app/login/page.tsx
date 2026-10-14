@@ -242,6 +242,110 @@ function PasswordField({ value, onChange, showPw, onToggleShow, autoComplete }: 
 }
 
 /* ------------------------------------------------------------------ */
+/* "Check your inbox" panel (email confirmation)                       */
+/* ------------------------------------------------------------------ */
+type PendingState = {
+  email: string
+  emailSent: boolean
+  reason?: "cooldown" | "hourly" | "daily" | "failed"
+  /** where the user came from: a fresh signup, or a sign-in attempt on an unconfirmed account */
+  from: "signup" | "login"
+}
+
+const RESEND_COOLDOWN_SECONDS = 60
+
+function CheckInbox({ pending, onResend, onBack }: {
+  pending: PendingState
+  onResend: (email: string) => Promise<{ error?: string }>
+  onBack: () => void
+}) {
+  const { email, emailSent, reason, from } = pending
+  // The server holds back a second email for a minute, so the button waits as well
+  const [cooldown, setCooldown] = useState(from === "signup" && (emailSent || reason === "cooldown") ? RESEND_COOLDOWN_SECONDS : 0)
+  const [sending, setSending] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (cooldown <= 0) return
+    const t = setTimeout(() => setCooldown((c) => c - 1), 1000)
+    return () => clearTimeout(t)
+  }, [cooldown])
+
+  async function resend() {
+    if (sending || cooldown > 0) return
+    setSending(true)
+    setError(null)
+    setNotice(null)
+    const result = await onResend(email)
+    setSending(false)
+    if (result.error) { setError(result.error); return }
+    // Same message whether or not the address exists: the server does not reveal it either
+    setNotice("If this address has an account waiting for confirmation, a new link is on its way.")
+    setCooldown(RESEND_COOLDOWN_SECONDS)
+  }
+
+  let heading = "Check your inbox"
+  let body: React.ReactNode = (
+    <>We sent a confirmation link to <strong className="font-semibold text-[#d4d4d4] break-all">{email}</strong>. Open it to activate your account.</>
+  )
+  if (from === "login") {
+    heading = "Confirm your email"
+    body = (
+      <><strong className="font-semibold text-[#d4d4d4] break-all">{email}</strong> hasn&apos;t been confirmed yet. Open the link we sent you, or ask for a new one.</>
+    )
+  } else if (!emailSent) {
+    heading = "Almost there"
+    body = reason === "cooldown"
+      ? <>We already sent a link to <strong className="font-semibold text-[#d4d4d4] break-all">{email}</strong> a moment ago. Check your inbox.</>
+      : reason === "hourly"
+        ? <>Too many emails were sent to this address. Please try again in a while.</>
+        : <>Your account was created, but we couldn&apos;t send the confirmation email right now. Try again in a few minutes.</>
+  }
+
+  return (
+    <div className="px-6 pb-7 pt-8 text-center">
+      <div className="mx-auto mb-5 flex h-12 w-12 items-center justify-center rounded-2xl border border-[rgba(74,222,128,0.25)] bg-[rgba(74,222,128,0.08)]">
+        <MailIcon className="h-5 w-5 text-[#4ade80]" />
+      </div>
+      <h1 className="text-[21px] font-bold tracking-[-0.5px] text-[#f0f0f0]">{heading}</h1>
+      <p className="mt-2 text-[13px] leading-relaxed text-[#6b6b6b]">{body}</p>
+      <p className="mt-2 text-[12px] text-[#3a3a3a]">Can&apos;t find it? Check your spam folder. The link is valid for 24 hours.</p>
+
+      {error && (
+        <p role="alert" className="error-shake mt-5 rounded-xl border border-[rgba(248,113,113,0.25)] bg-[rgba(248,113,113,0.06)] px-4 py-3 text-[13px] text-[#f87171]">
+          {error}
+        </p>
+      )}
+      {notice && (
+        <p role="status" className="mt-5 rounded-xl border border-[rgba(74,222,128,0.25)] bg-[rgba(74,222,128,0.06)] px-4 py-3 text-[13px] text-[#86efac]">
+          {notice}
+        </p>
+      )}
+
+      <button
+        type="button" onClick={resend} disabled={sending || cooldown > 0}
+        className="mt-6 flex w-full cursor-pointer items-center justify-center gap-2 rounded-xl border-none bg-[#4ade80] px-5 py-[14px] text-[14px] font-semibold text-[#030712] transition-all duration-150 hover:bg-[#22c55e] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {sending ? (
+          <>
+            <span className="block h-4 w-4 animate-spin rounded-full border-2 border-[rgba(3,7,18,0.25)] border-t-[#030712]" />
+            Sending…
+          </>
+        ) : cooldown > 0 ? `Resend email in ${cooldown}s` : "Resend email"}
+      </button>
+
+      <button
+        type="button" onClick={onBack}
+        className="mt-4 cursor-pointer border-none bg-transparent p-0 text-[13px] font-semibold text-[#4ade80] transition-opacity hover:opacity-75"
+      >
+        {from === "signup" ? "Use a different email" : "Back to sign in"}
+      </button>
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
 /* Page                                                                */
 /* ------------------------------------------------------------------ */
 export default function LoginPage() {
@@ -255,7 +359,7 @@ export default function LoginPage() {
 function LoginInner() {
   const router = useRouter()
   const params = useSearchParams()
-  const { login, signup } = useAuth()
+  const { login, signup, resendVerification } = useAuth()
 
   const rawRedirect = params.get("redirect") ?? "/"
   // Allow only relative internal paths — block open redirect to external URLs
@@ -267,6 +371,7 @@ function LoginInner() {
   const [showPw, setShowPw] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const [pending, setPending] = useState<PendingState | null>(null)
   const [visible, setVisible] = useState(false)
   // slide direction: "left" = going to signup, "right" = going to login
   const [slideDir, setSlideDir] = useState<"left" | "right">("left")
@@ -298,8 +403,23 @@ function LoginInner() {
     if (password.length < 6) { setError("Password must be at least 6 characters."); return }
     setLoading(true)
     try {
-      const result = mode === "login" ? await login(email, password) : await signup(name, email, password)
-      if (result.error) { setError(result.error); return }
+      if (mode === "login") {
+        const result = await login(email, password)
+        if (result.code === "email_not_verified") {
+          setPending({ email: email.trim().toLowerCase(), emailSent: false, from: "login" })
+          return
+        }
+        if (result.error) { setError(result.error); return }
+      } else {
+        const result = await signup(name, email, password)
+        if (result.error) { setError(result.error); return }
+        if (result.pending) {
+          // Nothing to sign in to yet: the account has to be confirmed from the email first
+          setPassword("")
+          setPending({ ...result.pending, from: "signup" })
+          return
+        }
+      }
       router.push(redirect)
     } finally {
       setLoading(false)
@@ -419,6 +539,14 @@ function LoginInner() {
               {/* shimmer top line */}
               <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-[rgba(74,222,128,0.5)] to-transparent" />
 
+              {pending ? (
+                <CheckInbox
+                  pending={pending}
+                  onResend={resendVerification}
+                  onBack={() => { setPending(null); setError(null) }}
+                />
+              ) : (
+              <>
               {/* ── Tab switcher — inside the card ── */}
               <div className="px-6 pt-6 pb-0">
                 <div
@@ -520,6 +648,8 @@ function LoginInner() {
                   </p>
                 </div>
               </div>
+              </>
+              )}
             </div>
           </div>
         </div>
