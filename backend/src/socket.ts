@@ -639,21 +639,38 @@ export function registerSocketHandlers(io: Server) {
       }
     })
 
-    onClientEvent('format-code', async ({ language, code }: { language: string; code: string }) => {
-      if (!checkRateLimit(socket, 'format-code')) return
-      if (!isString(language)) return
-      if (!isBoundedString(code, LIMITS.RUN_CODE)) return
-      if (!currentRoom || !socket.data.admitted) return
-      if (getRole(socket) === 'viewer') return
+    onClientEvent('format-code', async (data: unknown, callback?: unknown) => {
+      const { fileId, language, code } = (data ?? {}) as { fileId?: unknown; language?: unknown; code?: unknown }
+      const reply = (result: { formatted: string; error: string }) => {
+        const response = { fileId, ...result }
+        if (typeof callback === 'function') callback(response)
+        else socket.emit('format-result', response)
+      }
+      const fail = (error: string) => reply({ formatted: '', error })
+      if (!checkRateLimit(socket, 'format-code')) return fail('Too many formatting requests. Wait a moment and try Format again.')
+      if (!isValidId(fileId) || !isString(language) || !isBoundedString(code, LIMITS.RUN_CODE)) {
+        return fail('Invalid formatting request or file too large to format.')
+      }
+      if (!currentRoom || !socket.data.admitted || getRole(socket) === 'viewer') return fail('You do not have permission to format this file.')
+      const roomId = currentRoom
+      if (!getFileSnapshot(roomId, fileId)) return fail('This file is no longer available.')
 
       const release = workloadLimit.acquire(workloadKey)
       if (!release) {
-        socket.emit('format-result', { formatted: code, error: 'Execution capacity reached. Wait for the current jobs to finish and try again.' })
+        fail('Execution capacity reached. Wait for the current jobs to finish and try again.')
         return
       }
       try {
         const result = await formatCode(language, code)
-        socket.emit('format-result', result)
+        if (!hasValidSession()) return
+        const role = currentUserId ? dbGetMemberRole(currentUserId, roomId) : getRole(socket)
+        if (currentRoom !== roomId || !socket.data.admitted || !role || role === 'viewer') {
+          return fail('You no longer have permission to format this file.')
+        }
+        if (!dbRoomExists(roomId) || !getFileSnapshot(roomId, fileId)) return fail('This file is no longer available.')
+        reply(result)
+      } catch {
+        fail('Formatting failed. Your code is unchanged. Try Format again.')
       } finally {
         release()
       }

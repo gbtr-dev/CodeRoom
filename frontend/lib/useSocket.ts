@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import { createSocket } from "./socket"
 import { FileSync, type FileSnapshot, type SyncView, type EditResult } from "./fileSync"
+import { FileFormatter } from "./fileFormatter"
 import type { FileNode, Lang, RemoteParticipant } from "./highlight"
 import { RUN_CMD } from "./highlight"
 import type { User } from "@/components/auth-provider"
@@ -42,8 +43,6 @@ export interface UseSocketCallbacks {
   setRunning: (running: boolean) => void
   setProgress: (progress: boolean) => void
   outputEndRef: { current: HTMLDivElement | null }
-  setFormatting: (v: boolean) => void
-  applyFormat: (code: string) => void
   applySyncedContent: (fileId: string, content: string, mapPosition?: (pos: number) => number) => void
 }
 
@@ -55,6 +54,9 @@ export interface UseSocketResult {
   flushFiles: () => void
   retrySync: (fileId: string) => void
   useShared: (fileId: string) => void
+  formatFile: (fileId: string, language: string) => void
+  formatting: boolean
+  formatNotices: Record<string, string>
   participants: RemoteParticipant[]
   myRole: Role
   roomName: string | null
@@ -91,6 +93,9 @@ export function useSocket(
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
 
   const syncRef = useRef<FileSync | null>(null)
+  const formatterRef = useRef<FileFormatter | null>(null)
+  const [formatting, setFormatting] = useState(false)
+  const [formatNotices, setFormatNotices] = useState<Record<string, string>>({})
   const [syncViews, setSyncViews] = useState<Record<string, SyncView>>({})
   const cb = useRef(callbacks)
   cb.current = callbacks
@@ -110,6 +115,14 @@ export function useSocket(
       cb.current.applySyncedContent(fileId, view.text, mapPosition)
     })
     syncRef.current = sync
+    const formatter = new FileFormatter(sync, (request, done) => {
+      socket.timeout(20000).emit('format-code', request, done)
+    }, (fileId, busy, notice) => {
+      setFormatting(busy)
+      setFormatNotices(prev => ({ ...prev, [fileId]: notice }))
+    })
+    formatterRef.current = formatter
+    setFormatNotices({})
     const beforeUnload = (event: BeforeUnloadEvent) => {
       if (sync.hasPending()) { event.preventDefault(); event.returnValue = '' }
     }
@@ -124,7 +137,7 @@ export function useSocket(
       socket.emit("join-room", { roomId, userName: user.name, isNew, roomName: initialName })
     })
 
-    socket.on("disconnect", () => { setConnected(false); sync.disconnect() })
+    socket.on("disconnect", () => { setConnected(false); sync.disconnect(); formatter.cancel() })
 
     socket.on("knock-pending", () => {
       setKnockStatus("pending")
@@ -234,6 +247,7 @@ export function useSocket(
 
     socket.on("role-refreshed", ({ role }: { role: Role }) => {
       setMyRole(role)
+      if (role === 'viewer') formatter.cancel()
     })
 
     socket.on("member-kicked", ({ userId }: { userId: string }) => {
@@ -289,14 +303,6 @@ export function useSocket(
       })
       cb.current.setOutput(lines)
       setTimeout(() => cb.current.outputEndRef.current?.scrollIntoView({ behavior: "smooth" }), 50)
-    })
-
-    socket.on("format-result", ({ formatted, error }: { formatted: string; error: string }) => {
-      cb.current.setFormatting(false)
-      if (!error && formatted && cb.current.activeIdRef.current) {
-        cb.current.applyFormat(formatted)
-        socket.emit("code-update", { fileId: cb.current.activeIdRef.current, content: formatted })
-      }
     })
 
     socket.on("file-created", ({ node, parentId }: { node: IncomingFile; parentId: string | null }) => {
@@ -367,6 +373,8 @@ export function useSocket(
     return () => {
       window.removeEventListener("beforeunload", beforeUnload)
       sync.disconnect()
+      formatter.cancel()
+      if (formatterRef.current === formatter) formatterRef.current = null
       if (syncRef.current === sync) syncRef.current = null
       socket.off("connect")
       socket.off("disconnect")
@@ -387,7 +395,6 @@ export function useSocket(
       socket.off("cursor-update")
       socket.off("run-started")
       socket.off("run-result")
-      socket.off("format-result")
       socket.off("file-created")
       socket.off("file-deleted")
       socket.off("file-renamed")
@@ -430,6 +437,9 @@ export function useSocket(
   }
 
   return {
+    formatting,
+    formatNotices,
+    formatFile: (fileId: string, language: string) => formatterRef.current?.start(fileId, language),
     syncViews,
     editFile: (fileId: string, content: string) => syncRef.current?.edit(fileId, content),
     flushFiles: () => syncRef.current?.flush(),

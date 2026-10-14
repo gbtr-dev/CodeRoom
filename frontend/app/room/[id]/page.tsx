@@ -114,7 +114,6 @@ export default function CoderoomPage() {
   const [stdinModal, setStdinModal] = useState(false)
   const [stdinValue, setStdinValue] = useState("")
   const [stdinFields, setStdinFields] = useState<string[]>([])
-  const [formatting, setFormatting] = useState(false)
 
   const [activeLine, setActiveLine] = useState(1)
   const [activeCol, setActiveCol] = useState(0)
@@ -175,6 +174,7 @@ export default function CoderoomPage() {
     socketRef,
     connected,
     syncViews, editFile, flushFiles, retrySync, useShared,
+    formatFile, formatting, formatNotices,
     participants,
     myRole,
     roomName,
@@ -197,11 +197,6 @@ export default function CoderoomPage() {
     setRunning,
     setProgress,
     outputEndRef,
-    setFormatting,
-    applyFormat: (code: string) => {
-      if (!activeIdRef.current) return
-      setActiveContent(code)
-    },
     applySyncedContent,
   })
 
@@ -852,8 +847,7 @@ export default function CoderoomPage() {
   function format() {
     if (!activeNode || !canEdit) return
     if (!activeContent.trim()) return
-    setFormatting(true)
-    socketRef.current?.emit("format-code", { language: lang, code: activeContent })
+    formatFile(activeNode.id, lang)
   }
 
   function extractInputPrompts(code: string, language: string): string[] {
@@ -1189,7 +1183,7 @@ export default function CoderoomPage() {
           {canEdit && FMT_LANGS.has(lang) && (
             <button
               onClick={format}
-              disabled={formatting || running}
+              disabled={formatting || running || !connected || !syncViews[activeId] || !!syncViews[activeId]?.error || !!syncViews[activeId]?.conflict}
               className="flex items-center gap-1.5 rounded-md border border-[#1e1e1e] px-3 py-1.5 font-sans text-[12px] font-medium text-neutral-400 transition-all hover:border-[#2e2e2e] hover:text-neutral-200 disabled:cursor-not-allowed disabled:opacity-40"
             >
               {formatting ? (
@@ -1316,6 +1310,7 @@ export default function CoderoomPage() {
           </div>
 
           {activeNode && <SyncStatus
+            notice={formatNotices[activeId]}
             view={syncViews[activeId]}
             connected={connected}
             onDownload={() => exportFile({ ...activeNode, content: syncViews[activeId]?.text ?? activeContent, name: 'draft-' + activeNode.name })}

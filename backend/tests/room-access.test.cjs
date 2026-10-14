@@ -147,7 +147,8 @@ test('execution capacity is shared across tabs, formatting and reconnects', asyn
   second.emit('run-code', { language: 'c', code: 'code' })
   assert.match((await denied).data.error, /capacity/)
   const formatDenied = nextEvent(second, ['format-result'])
-  second.emit('format-code', { language: 'go', code: 'code' })
+  const fileId = require('../src/rooms').createFile(roomId, null, 'main.go', 'file', 'code').id
+  second.emit('format-code', { fileId, language: 'go', code: 'code' })
   assert.match((await formatDenied).data.error, /capacity/)
   first.disconnect()
   const reconnected = await clientFor(t, owner)

@@ -1,9 +1,10 @@
 import { Button } from '@/components/ui/button'
 import type { SyncView } from '@/lib/fileSync'
 
-export function SyncStatus({ view, connected, onDownload, onUseShared, onRetry }: {
+export function SyncStatus({ view, connected, notice, onDownload, onUseShared, onRetry }: {
   view?: SyncView
   connected: boolean
+  notice?: string
   onDownload: () => void
   onUseShared: () => void
   onRetry: () => void
@@ -17,6 +18,7 @@ export function SyncStatus({ view, connected, onDownload, onUseShared, onRetry }
           : !connected ? 'Disconnected. Keep this tab open to preserve unshared changes.'
           : view?.pending ? 'Sharing changes…' : 'Changes shared')}
       </span>
+      {notice && <span role="status" className="min-w-0 break-words">{notice}</span>}
       {needsRecovery && <Button variant="outline" size="xs" className="cursor-pointer border-neutral-700 bg-transparent text-neutral-200 hover:bg-neutral-800 hover:text-white" onClick={onDownload}>Download my draft</Button>}
       {view?.conflict && !view.error && <Button variant="outline" size="xs" className="cursor-pointer border-neutral-700 bg-transparent text-neutral-200 hover:bg-neutral-800 hover:text-white" onClick={() => {
         onDownload()

@@ -11,6 +11,7 @@ type State = {
   uncertain?: Flight
   conflict: boolean
   error?: string
+  draftVersion: number
 }
 
 /** One acknowledged write per file; unsent and in-flight drafts are never server state. */
@@ -38,6 +39,7 @@ export class FileSync {
   disconnect() {
     this.connected = false
     for (const [id, state] of this.files) {
+      state.draftVersion++
       // A lost acknowledgement is ambiguous. Reconcile with a fresh snapshot
       // before sending anything again; do not replay the old positional patch.
       if (state.flight) state.uncertain = state.flight
@@ -64,7 +66,7 @@ export class FileSync {
   receive(snapshot: FileSnapshot) {
     const state = this.files.get(snapshot.fileId)
     if (!state) {
-      this.files.set(snapshot.fileId, { base: snapshot, local: snapshot.content, conflict: false })
+      this.files.set(snapshot.fileId, { base: snapshot, local: snapshot.content, conflict: false, draftVersion: 0 })
       this.publish(snapshot.fileId)
       return
     }
@@ -88,15 +90,35 @@ export class FileSync {
     state.error = undefined
     state.conflict = wasConflict || merged.conflict
     if (state.local === snapshot.content) state.conflict = false
-    if (!state.conflict) state.local = merged.text
+    if (!state.conflict) {
+      if (state.local !== merged.text) state.draftVersion++
+      state.local = merged.text
+    }
     this.publish(snapshot.fileId, state.conflict ? undefined : merged.mapPosition)
   }
 
   edit(fileId: string, text: string) {
     const state = this.files.get(fileId)
     if (!state) return
+    if (state.local !== text) state.draftVersion++
     state.local = text
     this.publish(fileId)
+  }
+
+  /** Capture a draft for asynchronous formatting; never replace later edits. */
+  prepareTransform(fileId: string) {
+    const state = this.files.get(fileId)
+    if (!this.connected || !state || state.error || state.conflict) return undefined
+    const version = state.draftVersion
+    return {
+      text: state.local,
+      apply: (text: string) => {
+        if (!this.connected || this.files.get(fileId) !== state || state.draftVersion !== version || state.error || state.conflict) return false
+        this.edit(fileId, text)
+        this.flush(fileId)
+        return true
+      },
+    }
   }
 
   flush(fileId?: string) {
@@ -130,6 +152,7 @@ export class FileSync {
   useShared(fileId: string) {
     const state = this.files.get(fileId)
     if (!state || !state.conflict) return
+    state.draftVersion++
     state.local = state.base.content
     state.conflict = false
     this.publish(fileId)
@@ -142,6 +165,7 @@ export class FileSync {
   remove(fileId: string) {
     const state = this.files.get(fileId)
     if (!state) return
+    state.draftVersion++
     if (this.view(fileId)?.pending) {
       state.flight = undefined
       state.error = 'This file was deleted. Download your draft before leaving.'

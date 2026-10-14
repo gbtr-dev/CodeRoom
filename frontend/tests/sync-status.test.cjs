@@ -30,3 +30,10 @@ test('disconnected failures retain the draft download and disable retry', () => 
   assert.ok(items.find(item => item.props.children === 'Download my draft'))
   assert.equal(items.find(item => item.props.children === 'Retry sharing').props.disabled, true)
 })
+
+test('formatting failure is announced without hiding the sharing state', () => {
+  const items = render({ view: { pending: true }, notice: 'Formatting skipped. Try Format again.' })
+  assert.equal(items[0].props.children, 'Sharing changes…')
+  assert.equal(items[1].props.children, 'Formatting skipped. Try Format again.')
+  assert.equal(items[1].props.role, 'status')
+})

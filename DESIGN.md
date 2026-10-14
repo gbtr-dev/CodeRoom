@@ -70,3 +70,12 @@ never replay an old positional edit blindly. Failed writes require explicit retr
 
 Use a polite live region, preserve keyboard focus, and keep recovery controls
 visible. No new animation, modal, search control, or locale convention is added.
+
+### Formatting
+
+Formatting belongs to the file and draft captured when Format is clicked.
+Switching tabs does not redirect the result. Later edits invalidate the result;
+keep the draft and show a retry message in that file's existing status strip.
+Accepted results use the same acknowledged synchronization flow as typing.
+Errors, timeouts and disconnects end the busy state without changing the code.
+The status strip reports formatting notices separately from sharing status.
