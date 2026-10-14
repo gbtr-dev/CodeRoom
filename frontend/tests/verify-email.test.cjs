@@ -64,7 +64,7 @@ test('opening and rendering the page never verifies; only an explicit click send
   let release
   const page = mount(() => { calls++; return new Promise(resolve => { release = resolve }) })
   assert.equal(calls, 0)
-  assert.ok(page.removed() > 0)
+  assert.equal(page.removed(), 0)
   const action = page.button()
   assert.equal(action.props.children, 'Confirm email')
   const pending = action.props.onClick()
@@ -74,6 +74,7 @@ test('opening and rendering the page never verifies; only an explicit click send
   release({ status: 'verified', purpose: 'signup', email: 'user@example.com' })
   await pending
   assert.equal(page.button(), null)
+  assert.equal(page.removed(), 1)
   await action.props.onClick()
   assert.equal(calls, 1)
 })
@@ -102,4 +103,18 @@ test('missing token cannot be submitted; invalid and expired responses cannot be
     await page.button().props.onClick()
     assert.equal(page.button(), null)
   }
+})
+
+
+test('refresh before confirmation retains the link and network failure does not remove it', async () => {
+  let calls = 0
+  const verify = async () => { calls++; return { status: 'error' } }
+  const first = mount(verify)
+  assert.equal(first.removed(), 0)
+  const refreshed = mount(verify)
+  assert.equal(refreshed.button().props.children, 'Confirm email')
+  assert.equal(calls, 0)
+  await refreshed.button().props.onClick()
+  assert.equal(refreshed.removed(), 0)
+  assert.equal(refreshed.button().props.children, 'Try again')
 })

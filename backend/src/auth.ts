@@ -174,7 +174,7 @@ export async function registerAuthRoutes(app: FastifyInstance) {
     if (name.trim().length > 60) {
       return reply.status(400).send({ error: 'Name must be 60 characters or less' })
     }
-    if (!isValidEmail(email)) {
+    if (!isValidEmail(email.trim())) {
       return reply.status(400).send({ error: 'Please enter a valid email address' })
     }
     if (password.length < 6) {
@@ -195,7 +195,10 @@ export async function registerAuthRoutes(app: FastifyInstance) {
     let userId: string
     if (latest) {
       if (latest.email_verified_at) {
-        return reply.send({ status: 'verification_required', email: normalizedEmail })
+        return reply.status(409).send({
+          code: 'email_already_registered',
+          error: 'This email is already registered. Sign in with your existing account.',
+        })
       }
       // Preserve earlier links and credentials until the owner confirms a specific request.
       userId = latest.id

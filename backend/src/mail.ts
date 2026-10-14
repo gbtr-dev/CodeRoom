@@ -152,12 +152,16 @@ function escapeHtml(value: string): string {
 
 type VerificationCopy = {
   subject: Record<VerificationEmailPurpose, string>
+  heading: Record<VerificationEmailPurpose, string>
+  label: string
+  nextStep: string
   greeting: (name: string) => string
   intro: Record<VerificationEmailPurpose, string>
   button: Record<VerificationEmailPurpose, string>
   expiry: (hours: number) => string
   ignore: Record<VerificationEmailPurpose, string>
   fallback: string
+  footer: string
 }
 
 const COPY: Record<MailLang, VerificationCopy> = {
@@ -166,6 +170,9 @@ const COPY: Record<MailLang, VerificationCopy> = {
       signup: 'Confirm your email address — Coderoom',
       change: 'Confirm your new email address — Coderoom',
     },
+    heading: { signup: 'One last step. Make it yours.', change: 'Confirm your new email.' },
+    label: 'YOUR CODEROOM ACCOUNT',
+    nextStep: 'The link opens a page where you can review and confirm your request.',
     greeting: (name) => `Hi ${name},`,
     intro: {
       signup: 'Thanks for signing up for Coderoom. Please confirm this email address to activate your account.',
@@ -178,12 +185,16 @@ const COPY: Record<MailLang, VerificationCopy> = {
       change: "If you didn't request this change, you can ignore this message: nothing will change.",
     },
     fallback: "If the button doesn't work, copy this address into your browser:",
+    footer: "An account notification from Coderoom.",
   },
   it: {
     subject: {
       signup: 'Conferma il tuo indirizzo email — Coderoom',
       change: 'Conferma il nuovo indirizzo email — Coderoom',
     },
+    heading: { signup: 'Un ultimo passo. Ci sei.', change: 'Conferma la nuova email.' },
+    label: 'IL TUO ACCOUNT CODEROOM',
+    nextStep: 'Il link apre una pagina dove puoi confermare la tua richiesta.',
     greeting: (name) => `Ciao ${name},`,
     intro: {
       signup: 'Grazie per esserti registrato su Coderoom. Per attivare il tuo account conferma questo indirizzo email.',
@@ -196,6 +207,7 @@ const COPY: Record<MailLang, VerificationCopy> = {
       change: 'Se non hai chiesto tu questa modifica, puoi ignorare questo messaggio: non cambierà nulla.',
     },
     fallback: 'Se il pulsante non funziona, copia questo indirizzo nel browser:',
+    footer: 'Una comunicazione relativa al tuo account.',
   },
 }
 
@@ -220,20 +232,57 @@ export function buildVerificationEmail(params: {
 
   const html = `<!doctype html>
 <html lang="${lang}">
-  <body style="margin:0;padding:24px;background:#f4f4f5;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#18181b;">
-    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:480px;margin:0 auto;background:#ffffff;border-radius:12px;padding:32px;">
-      <tr><td>
-        <h1 style="margin:0 0 16px;font-size:20px;">${escapeHtml(greeting)}</h1>
-        <p style="margin:0 0 24px;font-size:15px;line-height:1.5;">${escapeHtml(intro)}</p>
-        <p style="margin:0 0 24px;">
-          <a href="${safeLink}" style="display:inline-block;background:#18181b;color:#ffffff;text-decoration:none;padding:12px 20px;border-radius:8px;font-size:15px;font-weight:600;">${escapeHtml(button)}</a>
-        </p>
-        <p style="margin:0 0 8px;font-size:13px;line-height:1.5;color:#52525b;">${escapeHtml(expiry)}</p>
-        <p style="margin:0 0 24px;font-size:13px;line-height:1.5;color:#52525b;">${escapeHtml(ignore)}</p>
-        <p style="margin:0;font-size:12px;line-height:1.5;color:#71717a;">${escapeHtml(copy.fallback)}<br><span style="word-break:break-all;">${safeLink}</span></p>
-      </td></tr>
-    </table>
-  </body>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>${escapeHtml(subject)}</title>
+</head>
+<body style="margin:0;padding:0;width:100%;background-color:#edf1ef;color:#17221c;font-family:Arial,Helvetica,sans-serif;-webkit-text-size-adjust:100%;">
+  <div style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all;">${escapeHtml(intro)} ${escapeHtml(expiry)}</div>
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#edf1ef" style="width:100%;background-color:#edf1ef;">
+    <tr><td align="center" style="padding:36px 16px;">
+      <!--[if mso]><table role="presentation" width="560" cellspacing="0" cellpadding="0" border="0"><tr><td><![endif]-->
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:560px;border-collapse:separate;">
+        <tr><td bgcolor="#101915" style="padding:26px 28px;background-color:#101915;border-radius:16px 16px 0 0;border-bottom:3px solid #4ade80;">
+          <table role="presentation" cellspacing="0" cellpadding="0" border="0"><tr>
+            <td style="padding-right:12px;color:#4ade80;font-family:Consolas,Menlo,monospace;font-size:22px;font-weight:bold;">&lt;/&gt;</td>
+            <td style="color:#ffffff;font-family:Arial,Helvetica,sans-serif;font-size:21px;font-weight:bold;letter-spacing:-0.5px;">Coderoom</td>
+          </tr></table>
+        </td></tr>
+        <tr><td bgcolor="#ffffff" style="padding:32px 28px;background-color:#ffffff;border-left:1px solid #dce5df;border-right:1px solid #dce5df;">
+          <p style="margin:0 0 14px;color:#39714e;font-size:11px;line-height:16px;font-weight:bold;letter-spacing:1.6px;">${escapeHtml(copy.label)}</p>
+          <h1 style="margin:0 0 24px;color:#13251a;font-size:30px;line-height:36px;letter-spacing:-0.8px;font-weight:bold;">${escapeHtml(copy.heading[purpose])}</h1>
+          <p style="margin:0 0 10px;color:#17221c;font-size:16px;line-height:25px;font-weight:bold;">${escapeHtml(greeting)}</p>
+          <p style="margin:0 0 26px;color:#4b5c52;font-size:15px;line-height:25px;">${escapeHtml(intro)}</p>
+          <table role="presentation" cellspacing="0" cellpadding="0" border="0"><tr>
+            <td align="center" bgcolor="#4ade80" style="background-color:#4ade80;border-radius:8px;mso-padding-alt:16px 24px;">
+              <a href="${safeLink}" style="display:inline-block;border:1px solid #4ade80;border-radius:8px;padding:15px 23px;color:#102218;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:20px;font-weight:bold;text-decoration:none;mso-padding-alt:0;">${escapeHtml(button)}</a>
+            </td>
+          </tr></table>
+          <p style="margin:16px 0 24px;color:#5c6b62;font-size:12px;line-height:19px;">${escapeHtml(copy.nextStep)}</p>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tr>
+            <td bgcolor="#f1f7f3" style="padding:14px 16px;background-color:#f1f7f3;border-left:3px solid #4ade80;color:#365340;font-size:13px;line-height:21px;">${escapeHtml(expiry)}</td>
+          </tr></table>
+          <p style="margin:20px 0 0;color:#5c6b62;font-size:13px;line-height:21px;">${escapeHtml(ignore)}</p>
+        </td></tr>
+        <tr><td bgcolor="#f8faf9" style="padding:22px 28px;background-color:#f8faf9;border:1px solid #dce5df;border-radius:0 0 16px 16px;">
+          <p style="margin:0 0 8px;color:#5c6b62;font-size:12px;line-height:19px;">${escapeHtml(copy.fallback)}</p>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;table-layout:fixed;border-collapse:separate;">
+            <tr><td bgcolor="#ffffff" style="padding:14px 16px;background-color:#ffffff;border:1px solid #dce5df;border-radius:8px;word-break:break-all;overflow-wrap:anywhere;">
+              <a href="${safeLink}" style="color:#365340;font-family:Consolas,Menlo,monospace;font-size:12px;line-height:20px;text-decoration:underline;word-break:break-all;overflow-wrap:anywhere;">${safeLink}</a>
+            </td></tr>
+          </table>
+        </td></tr>
+        <tr><td align="center" style="padding:24px 16px 4px;">
+          <p style="margin:0 0 5px;color:#365340;font-size:13px;line-height:20px;font-weight:bold;">Coderoom</p>
+          <p style="margin:0;color:#64756a;font-size:12px;line-height:19px;">${escapeHtml(copy.footer)}</p>
+        </td></tr>
+      </table>
+      <!--[if mso]></td></tr></table><![endif]-->
+    </td></tr>
+  </table>
+</body>
 </html>`
 
   const text = `${greeting}
@@ -241,6 +290,8 @@ export function buildVerificationEmail(params: {
 ${intro}
 
 ${button}: ${link}
+
+${copy.nextStep}
 
 ${expiry}
 ${ignore}

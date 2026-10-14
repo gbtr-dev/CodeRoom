@@ -315,8 +315,8 @@ TRUSTED_PROXIES=127.0.0.1,::1
 ## Security
 
 - `httpOnly` + `SameSite=lax` session cookies (no stateless JWT)
-- Email links require an explicit Confirm email action; opening the page does not consume the token. The token is removed from the URL and retained only in component memory. Reloading before confirmation requires reopening the email link.
-- Signup returns a neutral acknowledgement for new, pending and verified addresses, without delivery status. Delivery runs asynchronously; a process interruption may require resending. Login uses the same generic failure for unknown, pending and incorrect credentials and performs a cost-10 dummy bcrypt check for unknown addresses.
+- Email links require an explicit Confirm email action; opening the page does not consume the token. The token remains in the URL until confirmation succeeds, so refreshing before confirmation does not lose it. The page uses no-referrer and noindex metadata.
+- Signup explicitly rejects verified addresses with HTTP 409 and email_already_registered, as requested for the product flow. This intentionally discloses that those addresses are registered. New and pending signups receive a verification acknowledgement without delivery status. Delivery runs asynchronously; a process interruption may require resending. Login uses the same generic failure for unknown, pending and incorrect credentials and performs a cost-10 dummy bcrypt check for unknown addresses.
 - CSRF protection via Origin/Referer check on every mutating request
 - Per-event and per-route rate limiting (anti brute-force)
 - Failed logins are limited per email + client IP (5 failures in 5 minutes, 10-minute lock), never across an entire account. The login route also limits each IP to 10 requests/minute. Clients sharing a public IP share these limits; only configured trusted proxies may supply the client IP.

@@ -282,13 +282,21 @@ test('signup after preregistration activates only the credentials from the selec
   assert.equal((await post('/auth/login', { email, password: 'owner-pass-1' })).statusCode, 200)
 })
 
-test('signup with an already confirmed address gives a neutral response and changes nothing', async () => {
+test('signup rejects an already confirmed address without changing the existing account', async () => {
   const email = uniqueEmail('taken')
   await registerAndConfirm(email, 'original-pass')
+  const original = db.dbGetUserByEmail(email)
+  const countBefore = db.default.prepare('SELECT COUNT(*) AS n FROM users').get().n
   sent.length = 0
 
   const res = await post('/auth/signup', { name: 'Intruder', email, password: 'intruder-pass' })
-  assert.equal(res.statusCode, 200)
+  assert.equal(res.statusCode, 409)
+  assert.equal(res.json().code, 'email_already_registered')
+  const normalized = await post('/auth/signup', { name: 'Intruder', email: ` ${email.toUpperCase()} `, password: 'intruder-pass' })
+  assert.equal(normalized.statusCode, 409)
+  assert.equal(db.default.prepare('SELECT COUNT(*) AS n FROM users').get().n, countBefore)
+  assert.deepEqual(db.dbGetUserByEmail(email), original)
+  assert.equal(res.cookies.length, 0)
   assert.equal(sent.length, 0)
   assert.equal((await post('/auth/login', { email, password: 'intruder-pass' })).statusCode, 401)
   assert.equal((await post('/auth/login', { email, password: 'original-pass' })).statusCode, 200)
@@ -644,7 +652,7 @@ test('shared bcrypt comparison rejects overlong ASCII and Unicode inputs for roo
 })
 
 
-test('signup responses and hashing work are identical for new, pending and verified addresses', async t => {
+test('signup keeps pending requests recoverable but explicitly rejects verified addresses', async t => {
   const verified = uniqueEmail('enum-verified')
   await registerAndConfirm(verified)
   const original = bcrypt.hash
@@ -654,8 +662,9 @@ test('signup responses and hashing work are identical for new, pending and verif
   const fresh = uniqueEmail('enum-fresh')
   for (const email of [fresh, fresh, verified]) {
     const res = await post('/auth/signup', { name: 'Attempt', email, password: 'chosen-pass' })
-    assert.equal(res.statusCode, 200)
-    assert.deepEqual(res.json(), { status: 'verification_required', email })
+    assert.equal(res.statusCode, email === verified ? 409 : 200)
+    if (email === verified) assert.equal(res.json().code, 'email_already_registered')
+    else assert.deepEqual(res.json(), { status: 'verification_required', email })
     assert.equal(res.cookies.length, 0)
     const login = await post('/auth/login', { email, password: 'chosen-pass' })
     assert.equal(login.statusCode, 401)

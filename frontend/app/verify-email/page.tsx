@@ -1,7 +1,7 @@
 "use client"
 
 import type React from "react"
-import { Suspense, useEffect, useRef, useState } from "react"
+import { Suspense, useRef, useState } from "react"
 import Link from "next/link"
 import { useSearchParams } from "next/navigation"
 import { useAuth } from "@/components/auth-provider"
@@ -54,16 +54,12 @@ export default function VerifyEmailPage() {
 
 function VerifyEmailInner() {
   const params = useSearchParams()
-  // Retain the token only in component memory after removing it from the URL.
+  // Keep the URL intact until confirmation succeeds so refresh/remount can recover it.
   const [token] = useState(() => params.get("token"))
   const { verifyEmail, logout } = useAuth()
   const [view, setView] = useState<View>({ kind: token ? "ready" : "invalid" })
   const inFlight = useRef(false)
   const consumed = useRef(false)
-
-  useEffect(() => {
-    if (token) window.history.replaceState(window.history.state, "", window.location.pathname)
-  }, [token])
 
   async function confirm() {
     if (!token || inFlight.current || consumed.current) return
@@ -73,6 +69,7 @@ function VerifyEmailInner() {
       const result = await verifyEmail(token)
       if (result.status === "verified") {
         consumed.current = true
+        window.history.replaceState(window.history.state, "", window.location.pathname)
         setView({ kind: "verified", purpose: result.purpose, email: result.email })
         if (result.purpose === "change") void logout()
       } else {

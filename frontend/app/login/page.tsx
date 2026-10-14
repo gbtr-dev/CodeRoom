@@ -252,10 +252,11 @@ type PendingState = {
 
 const RESEND_COOLDOWN_SECONDS = 60
 
-function CheckInbox({ pending, onResend, onBack }: {
+function CheckInbox({ pending, onResend, onBack, onSignIn }: {
   pending: PendingState
   onResend: (email: string) => Promise<{ error?: string }>
   onBack: () => void
+  onSignIn: () => void
 }) {
   const { email, from } = pending
   // The server holds back a second email for a minute, so the button waits as well
@@ -279,13 +280,13 @@ function CheckInbox({ pending, onResend, onBack }: {
     setSending(false)
     if (result.error) { setError(result.error); return }
     // Same message whether or not the address exists: the server does not reveal it either
-    setNotice("If this address has an account waiting for confirmation, a new link is on its way.")
+    setNotice("Request received. A new link can only be sent for an account awaiting confirmation, subject to sending limits. If your account is already active, sign in.")
     setCooldown(RESEND_COOLDOWN_SECONDS)
   }
 
-  let heading = "Check your inbox"
+  let heading = "Registration request received"
   let body: React.ReactNode = (
-    <>If registration can proceed, a confirmation link will be sent to <strong className="font-semibold text-[#d4d4d4] break-all">{email}</strong>. Open it to activate your account. If you already have an account, sign in. If no email arrives, try requesting a new link in a few minutes.</>
+    <>You submitted a request for <strong className="font-semibold text-[#d4d4d4] break-all">{email}</strong>. This does not confirm that a new account was created.</>
   )
   if (from === "login") {
     heading = "Confirm your email"
@@ -302,7 +303,14 @@ function CheckInbox({ pending, onResend, onBack }: {
       </div>
       <h1 className="text-[21px] font-bold tracking-[-0.5px] text-[#f0f0f0]">{heading}</h1>
       <p className="mt-2 text-[13px] leading-relaxed text-[#6b6b6b]">{body}</p>
-      <p className="mt-2 text-[12px] text-[#3a3a3a]">Can&apos;t find it? Check your spam folder. The link is valid for 24 hours.</p>
+      <div className="mt-5 space-y-3 text-left text-[13px] leading-relaxed text-[#a3a3a3]">
+        <p><strong className="text-[#d4d4d4]">Already registered?</strong> Sign in with your existing password. This request will not create a duplicate account or change your password. Active accounts do not receive another confirmation email.</p>
+        <p><strong className="text-[#d4d4d4]">Registering for the first time?</strong> Check your inbox and spam folder for a confirmation link. Your account is not active until you confirm. If no email arrives, wait a minute and request another link.</p>
+      </div>
+      <button type="button" onClick={onSignIn}
+        className="mt-6 flex w-full cursor-pointer items-center justify-center rounded-xl bg-[#4ade80] px-5 py-[14px] text-[14px] font-semibold text-[#030712] hover:bg-[#22c55e] focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#4ade80]">
+        Sign in with an existing account
+      </button>
 
       {error && (
         <p role="alert" className="error-shake mt-5 rounded-xl border border-[rgba(248,113,113,0.25)] bg-[rgba(248,113,113,0.06)] px-4 py-3 text-[13px] text-[#f87171]">
@@ -317,14 +325,14 @@ function CheckInbox({ pending, onResend, onBack }: {
 
       <button
         type="button" onClick={resend} disabled={sending || cooldown > 0}
-        className="mt-6 flex w-full cursor-pointer items-center justify-center gap-2 rounded-xl border-none bg-[#4ade80] px-5 py-[14px] text-[14px] font-semibold text-[#030712] transition-all duration-150 hover:bg-[#22c55e] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
+        className="mt-3 flex w-full cursor-pointer items-center justify-center gap-2 rounded-xl border border-white/20 bg-transparent px-5 py-[14px] text-[14px] font-semibold text-[#d4d4d4] hover:bg-white/5 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#4ade80] disabled:cursor-not-allowed disabled:opacity-50"
       >
         {sending ? (
           <>
             <span className="block h-4 w-4 animate-spin rounded-full border-2 border-[rgba(3,7,18,0.25)] border-t-[#030712]" />
-            Sending…
+            Requesting…
           </>
-        ) : cooldown > 0 ? `Resend email in ${cooldown}s` : "Resend email"}
+        ) : cooldown > 0 ? `Request another link in ${cooldown}s` : "Request another confirmation link"}
       </button>
 
       <button
@@ -534,6 +542,14 @@ function LoginInner() {
               {pending ? (
                 <CheckInbox
                   pending={pending}
+                  onSignIn={() => {
+                    setPending(null)
+                    setPassword("")
+                    setError(null)
+                    setMode("login")
+                    setDisplayMode("login")
+                    setAnimating(false)
+                  }}
                   onResend={resendVerification}
                   onBack={() => { setPending(null); setError(null) }}
                 />
@@ -609,10 +625,10 @@ function LoginInner() {
                       {loading ? (
                         <>
                           <span className="block h-4 w-4 animate-spin rounded-full border-2 border-[rgba(3,7,18,0.25)] border-t-[#030712]" />
-                          {mode === "login" ? "Signing in…" : "Creating account…"}
+                          {mode === "login" ? "Signing in…" : "Submitting request…"}
                         </>
                       ) : (
-                        mode === "login" ? "Sign in" : "Create account"
+                        mode === "login" ? "Sign in" : "Request registration"
                       )}
                     </button>
                   </form>
