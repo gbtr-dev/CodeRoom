@@ -7,6 +7,7 @@ import { useSearchParams } from "next/navigation"
 import { useAuth } from "@/components/auth-provider"
 
 type View =
+  | { kind: "ready" }
   | { kind: "loading" }
   | { kind: "verified"; purpose: "signup" | "change"; email: string }
   | { kind: "expired" }
@@ -14,7 +15,7 @@ type View =
   | { kind: "invalid" }
   | { kind: "error" }
 
-function StatusIcon({ tone }: { tone: "ok" | "bad" | "wait" }) {
+function StatusIcon({ tone }: { tone: "ok" | "bad" | "wait" | "ready" }) {
   const color = tone === "ok" ? "#4ade80" : tone === "bad" ? "#f87171" : "#a3a3a3"
   return (
     <div
@@ -25,7 +26,7 @@ function StatusIcon({ tone }: { tone: "ok" | "bad" | "wait" }) {
         <span className="block h-5 w-5 animate-spin rounded-full border-2 border-current/30 border-t-current" />
       ) : (
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5" aria-hidden="true">
-          {tone === "ok" ? <path d="M20 6 9 17l-5-5" /> : <path d="M18 6 6 18M6 6l12 12" />}
+          {tone === "ok" ? <path d="M20 6 9 17l-5-5" /> : tone === "ready" ? <><rect x="3" y="5" width="18" height="14" rx="2" /><path d="m3 6 9 7 9-7" /></> : <path d="M18 6 6 18M6 6l12 12" />}
         </svg>
       )}
     </div>
@@ -53,29 +54,44 @@ export default function VerifyEmailPage() {
 
 function VerifyEmailInner() {
   const params = useSearchParams()
-  const token = params.get("token")
+  // Retain the token only in component memory after removing it from the URL.
+  const [token] = useState(() => params.get("token"))
   const { verifyEmail, logout } = useAuth()
-  const [view, setView] = useState<View>({ kind: token ? "loading" : "invalid" })
-  // In development React runs effects twice: the link can only be used once, so send it only once
-  const started = useRef(false)
+  const [view, setView] = useState<View>({ kind: token ? "ready" : "invalid" })
+  const inFlight = useRef(false)
+  const consumed = useRef(false)
 
   useEffect(() => {
-    if (!token || started.current) return
-    started.current = true
-    // Take the one-time token out of the address bar and the browser history
-    window.history.replaceState(null, "", window.location.pathname)
+    if (token) window.history.replaceState(window.history.state, "", window.location.pathname)
+  }, [token])
 
-    verifyEmail(token).then((result) => {
+  async function confirm() {
+    if (!token || inFlight.current || consumed.current) return
+    inFlight.current = true
+    setView({ kind: "loading" })
+    try {
+      const result = await verifyEmail(token)
       if (result.status === "verified") {
+        consumed.current = true
         setView({ kind: "verified", purpose: result.purpose, email: result.email })
-        // After an email change the server closed every session: clear the signed-in state here too
         if (result.purpose === "change") void logout()
       } else {
+        consumed.current = result.status !== "error"
         setView({ kind: result.status })
       }
-    })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token])
+    } catch {
+      setView({ kind: "error" })
+    } finally {
+      inFlight.current = false
+    }
+  }
+
+  const confirmButton = (label: string, disabled = false) => (
+    <button type="button" onClick={confirm} disabled={disabled} aria-busy={disabled}
+      className="mt-6 flex w-full cursor-pointer items-center justify-center rounded-xl bg-[#4ade80] px-5 py-[14px] text-[14px] font-semibold text-[#030712] transition-colors hover:bg-[#22c55e] focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#4ade80] disabled:cursor-wait disabled:opacity-60">
+      {label}
+    </button>
+  )
 
   let icon: React.ReactNode = <StatusIcon tone="wait" />
   let title = "Confirming your email…"
@@ -83,6 +99,15 @@ function VerifyEmailInner() {
   let action: React.ReactNode = null
 
   switch (view.kind) {
+    case "ready":
+      icon = <StatusIcon tone="ready" />
+      title = "Confirm your email"
+      text = "Confirm only if you requested this registration or email change. Opening this page does not activate the link."
+      action = confirmButton("Confirm email")
+      break
+    case "loading":
+      action = confirmButton("Confirming…", true)
+      break
     case "verified":
       icon = <StatusIcon tone="ok" />
       if (view.purpose === "change") {
@@ -100,7 +125,7 @@ function VerifyEmailInner() {
     case "expired":
       icon = <StatusIcon tone="bad" />
       title = "This link has expired"
-      text = "Confirmation links are valid for 24 hours. Sign in to get a new one, or repeat the email change from Settings."
+      text = "Confirmation links are valid for 24 hours. Repeat registration to request a new link, or repeat the email change from Settings."
       action = <ActionLink href="/login">Go to sign in</ActionLink>
       break
     case "taken":
@@ -118,7 +143,8 @@ function VerifyEmailInner() {
     case "error":
       icon = <StatusIcon tone="bad" />
       title = "Couldn't reach the server"
-      text = "Check your connection and open the link from your email again."
+      text = "Check your connection and try again."
+      action = confirmButton("Try again")
       break
   }
 

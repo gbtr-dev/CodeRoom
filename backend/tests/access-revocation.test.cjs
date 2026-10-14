@@ -301,7 +301,7 @@ test('revoked and expired sessions cannot send another event on an existing sock
     await join(client, roomId)
     const socket = io.sockets.sockets.get(client.id)
     if (expired) {
-      db.default.prepare('UPDATE sessions SET expires_at = ? WHERE id = ?').run(Math.floor(Date.now() / 1000) - 1, member.token)
+      db.default.prepare('UPDATE sessions SET expires_at = ? WHERE token_hash = ?').run(Math.floor(Date.now() / 1000) - 1, db.dbGetSession(member.token).token_hash)
     } else {
       db.dbDeleteSession(member.token)
     }
@@ -316,7 +316,7 @@ test('revoked and expired sessions cannot send another event on an existing sock
 test('session expiry closes an idle socket without waiting for a client event', async (t) => {
   const member = user()
   const expiresAt = Math.floor(Date.now() / 1000) + 10
-  db.default.prepare('UPDATE sessions SET expires_at = ? WHERE id = ?').run(expiresAt, member.token)
+  db.default.prepare('UPDATE sessions SET expires_at = ? WHERE token_hash = ?').run(expiresAt, db.dbGetSession(member.token).token_hash)
   const original = global.setTimeout
   let expire
   t.mock.method(global, 'setTimeout', (callback, delay, ...args) => {
@@ -339,7 +339,7 @@ test('pruning an old session on login also disconnects its idle socket', async (
   const member = user()
   const client = await clientFor(t, member)
   const socket = io.sockets.sockets.get(client.id)
-  db.default.prepare('UPDATE sessions SET created_at = 1 WHERE id = ?').run(member.token)
+  db.default.prepare('UPDATE sessions SET created_at = 1 WHERE token_hash = ?').run(db.dbGetSession(member.token).token_hash)
   for (let i = 0; i < 10; i++) createSession(member.id)
   assert.equal(db.dbGetSession(member.token), undefined)
   assert.equal(socket.connected, false)

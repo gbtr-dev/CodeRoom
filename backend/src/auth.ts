@@ -1,5 +1,6 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify'
 import bcrypt from 'bcryptjs'
+import { fitsBcrypt, comparePassword, PASSWORD_SIZE_ERROR } from './passwords'
 import { randomUUID, randomBytes } from 'crypto'
 import { nanoid } from 'nanoid'
 import {
@@ -33,7 +34,6 @@ import {
   dbAcceptInvite,
   dbConsumeEmailVerification,
   dbDeleteSessionsByUser,
-  dbReplaceUnverifiedUser,
   type RoomRole,
 } from './db'
 import { notifyRoomDeleted, notifyUserLeftRoom, notifyMemberRoleChanged, notifyMemberRemoved, disconnectAllUserSockets, disconnectRevokedUserSockets } from './socket'
@@ -43,6 +43,8 @@ import { isValidEmail } from './validation'
 import { hashVerificationToken, sendVerificationEmail } from './emailVerification'
 
 const log = createLogger('AUTH')
+// Same bcrypt cost as signup; generated once, never used for an actual account.
+const DUMMY_PASSWORD_HASH = bcrypt.hashSync(randomBytes(32).toString('hex'), 10)
 
 function readString(value: unknown): string | null {
   return typeof value === 'string' ? value : null
@@ -178,17 +180,12 @@ export async function registerAuthRoutes(app: FastifyInstance) {
     if (password.length < 6) {
       return reply.status(400).send({ error: 'Password must be at least 6 characters' })
     }
-    if (password.length > 72) {
-      return reply.status(400).send({ error: 'Password must be 72 characters or less' })
+    if (!fitsBcrypt(password)) {
+      return reply.status(400).send({ error: PASSWORD_SIZE_ERROR })
     }
 
     const trimmedName = name.trim()
     const normalizedEmail = email.toLowerCase().trim()
-
-    if (dbGetUserByEmail(normalizedEmail)?.email_verified_at) {
-      log.warn('Signup failed — email already in use', { name: trimmedName, email: maskEmail(normalizedEmail) })
-      return reply.status(409).send({ error: 'Email already in use' })
-    }
 
     const passwordHash = await bcrypt.hash(password, 10)
 
@@ -197,27 +194,22 @@ export async function registerAuthRoutes(app: FastifyInstance) {
     const latest = dbGetUserByEmail(normalizedEmail)
     let userId: string
     if (latest) {
-      if (latest.email_verified_at || !dbReplaceUnverifiedUser(latest.id, trimmedName, passwordHash)) {
-        return reply.status(409).send({ error: 'Email already in use' })
+      if (latest.email_verified_at) {
+        return reply.send({ status: 'verification_required', email: normalizedEmail })
       }
-      // Someone started a signup with this address but never confirmed it: the new request takes
-      // over, so a stranger cannot keep the address blocked for the real owner.
+      // Preserve earlier links and credentials until the owner confirms a specific request.
       userId = latest.id
-      log.info('Signup — unconfirmed account replaced', { userId, email: maskEmail(normalizedEmail) })
+      log.info('Signup — additional confirmation requested', { userId, email: maskEmail(normalizedEmail) })
     } else {
       userId = randomUUID()
       dbCreateUser(userId, trimmedName, normalizedEmail, passwordHash)
       log.info('Signup successful — waiting for email confirmation', { userId, name: trimmedName, email: maskEmail(normalizedEmail) })
     }
 
-    const result = await sendVerificationEmail({ userId, name: trimmedName, email: normalizedEmail, purpose: 'signup' })
-    const emailSent = result.status === 'sent'
-    return reply.send({
-      status: 'verification_required',
-      email: normalizedEmail,
-      emailSent,
-      ...(emailSent ? {} : { reason: result.status === 'throttled' ? result.reason : 'failed' }),
-    })
+    // Provider latency and delivery status must not reveal account existence.
+    void sendVerificationEmail({ userId, name: trimmedName, email: normalizedEmail, purpose: 'signup', signupCredentials: { name: trimmedName, passwordHash } })
+      .catch((err) => log.error('Signup verification failed', { error: String(err) }))
+    return reply.send({ status: 'verification_required', email: normalizedEmail })
   })
 
   // Login
@@ -239,7 +231,7 @@ export async function registerAuthRoutes(app: FastifyInstance) {
 
     const normalizedEmail = email.toLowerCase().trim()
 
-    const lockedForSeconds = checkLoginLock(normalizedEmail)
+    const lockedForSeconds = checkLoginLock(normalizedEmail, req.ip)
     if (lockedForSeconds !== null) {
       log.warn('Login bloccato — troppi tentativi falliti', { email: maskEmail(normalizedEmail), retryAfter: lockedForSeconds })
       reply.header('Retry-After', String(lockedForSeconds))
@@ -247,23 +239,13 @@ export async function registerAuthRoutes(app: FastifyInstance) {
     }
 
     const user = dbGetUserByEmail(normalizedEmail)
-    if (!user) {
-      recordLoginFailure(normalizedEmail)
-      log.warn('Login failed — user not found', { email: maskEmail(normalizedEmail) })
+    const valid = await comparePassword(password, user?.password_hash ?? DUMMY_PASSWORD_HASH)
+    // Pending accounts also use the generic response: signup followed by login with
+    // a chosen password must not reveal whether signup created a new account.
+    if (!user || !valid || !user.email_verified_at) {
+      recordLoginFailure(normalizedEmail, req.ip)
+      log.warn('Login failed', { email: maskEmail(normalizedEmail) })
       return reply.status(401).send({ error: 'Invalid email or password' })
-    }
-
-    const valid = await bcrypt.compare(password, user.password_hash)
-    if (!valid) {
-      recordLoginFailure(normalizedEmail)
-      log.warn('Login failed — wrong password', { userId: user.id, email: maskEmail(user.email) })
-      return reply.status(401).send({ error: 'Invalid email or password' })
-    }
-
-    // Only after the password is correct, so this answer cannot be used to discover who is registered
-    if (!user.email_verified_at) {
-      log.info('Login refused — email not confirmed', { userId: user.id, email: maskEmail(user.email) })
-      return reply.status(403).send({ error: 'Please confirm your email address before signing in', code: 'email_not_verified' })
     }
 
     const token = generateSessionToken()
@@ -272,14 +254,14 @@ export async function registerAuthRoutes(app: FastifyInstance) {
       return reply.status(401).send({ error: 'Invalid email or password' })
     }
     disconnectRevokedUserSockets(user.id)
-    recordLoginSuccess(normalizedEmail)
+    recordLoginSuccess(normalizedEmail, req.ip)
     log.info('Login successful', { userId: user.id, name: user.name, email: maskEmail(user.email) })
     reply.setCookie(SESSION_COOKIE_NAME, token, sessionCookieOptions(SESSION_TTL_SECONDS))
     return reply.send({ user: { id: user.id, name: user.name, email: user.email } })
   })
 
   // Confirms an email address (signup or email change). It is a POST on purpose: the page opened from
-  // the link sends it, so mail scanners that "click" links with a GET cannot use up the token.
+  // the link sends it only after explicit confirmation; GET and page mounting never consume it.
   app.post('/auth/verify-email', {
     config: {
       rateLimit: {
@@ -549,7 +531,7 @@ export async function registerAuthRoutes(app: FastifyInstance) {
       const current = dbGetUserById(req.userId)
       const userFull = dbGetUserByEmail(current?.email ?? '')
       if (!current || !userFull) return reply.status(404).send({ error: 'User not found' })
-      const valid = await bcrypt.compare(currentPassword, userFull.password_hash)
+      const valid = await comparePassword(currentPassword, userFull.password_hash)
       if (!valid) return reply.status(401).send({ error: 'Incorrect password' })
 
       const newEmail = email.toLowerCase().trim()
@@ -589,17 +571,19 @@ export async function registerAuthRoutes(app: FastifyInstance) {
 
     // Update password
     protectedRoutes.put('/auth/me/password', async (req, reply) => {
-      const { currentPassword, newPassword } = req.body as { currentPassword: string; newPassword: string }
+      const body = (req.body ?? {}) as Record<string, unknown>
+      const currentPassword = readString(body.currentPassword)
+      const newPassword = readString(body.newPassword)
       if (!currentPassword || !newPassword) return reply.status(400).send({ error: 'Both passwords are required' })
       if (newPassword.length < 6) return reply.status(400).send({ error: 'Password must be at least 6 characters' })
-      if (newPassword.length > 72) return reply.status(400).send({ error: 'Password must be 72 characters or less' })
+      if (!fitsBcrypt(newPassword)) return reply.status(400).send({ error: PASSWORD_SIZE_ERROR })
 
       const user = dbGetUserById(req.userId)
       if (!user) return reply.status(404).send({ error: 'User not found' })
       const userFull = dbGetUserByEmail(user.email)
       if (!userFull) return reply.status(404).send({ error: 'User not found' })
 
-      const valid = await bcrypt.compare(currentPassword, userFull.password_hash)
+      const valid = await comparePassword(currentPassword, userFull.password_hash)
       if (!valid) return reply.status(401).send({ error: 'Incorrect current password' })
 
       const hash = await bcrypt.hash(newPassword, 10)
@@ -620,7 +604,7 @@ export async function registerAuthRoutes(app: FastifyInstance) {
       const userFull = dbGetUserByEmail(user.email)
       if (!userFull) return reply.status(404).send({ error: 'User not found' })
 
-      const valid = await bcrypt.compare(password, userFull.password_hash)
+      const valid = await comparePassword(password, userFull.password_hash)
       if (!valid) return reply.status(401).send({ error: 'Incorrect password' })
 
       // Notify users in owned rooms before deleting data
@@ -660,6 +644,7 @@ export async function registerAuthRoutes(app: FastifyInstance) {
         return reply.status(400).send({ error: 'Password must be at least 4 characters' })
       }
 
+      if (!fitsBcrypt(password)) return reply.status(400).send({ error: PASSWORD_SIZE_ERROR })
       const hash = await bcrypt.hash(password, 10)
       dbSetRoomPassword(roomId, hash)
       log.info('Room password set', { roomId, userId: req.userId })
@@ -698,7 +683,7 @@ export async function registerAuthRoutes(app: FastifyInstance) {
         if (typeof password !== 'string' || !password) {
           return reply.status(403).send({ error: 'This room requires a password', requiresPassword: true })
         }
-        const valid = await bcrypt.compare(password, invite.password_hash)
+        const valid = await comparePassword(password, invite.password_hash)
         if (!valid) {
           return reply.status(403).send({ error: 'Incorrect password', wrongPassword: true })
         }

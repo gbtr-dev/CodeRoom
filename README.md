@@ -315,8 +315,13 @@ TRUSTED_PROXIES=127.0.0.1,::1
 ## Security
 
 - `httpOnly` + `SameSite=lax` session cookies (no stateless JWT)
+- Email links require an explicit Confirm email action; opening the page does not consume the token. The token is removed from the URL and retained only in component memory. Reloading before confirmation requires reopening the email link.
+- Signup returns a neutral acknowledgement for new, pending and verified addresses, without delivery status. Delivery runs asynchronously; a process interruption may require resending. Login uses the same generic failure for unknown, pending and incorrect credentials and performs a cost-10 dummy bcrypt check for unknown addresses.
 - CSRF protection via Origin/Referer check on every mutating request
 - Per-event and per-route rate limiting (anti brute-force)
+- Failed logins are limited per email + client IP (5 failures in 5 minutes, 10-minute lock), never across an entire account. The login route also limits each IP to 10 requests/minute. Clients sharing a public IP share these limits; only configured trusted proxies may supply the client IP.
+- Passwords are limited to 72 UTF-8 bytes before bcrypt hashing and comparison, including room passwords. Existing hashes cannot reveal whether an older password was truncated; affected users may require administrator-assisted password recovery, and affected room passwords must be replaced by their owners.
+- Session tokens are stored only as SHA-256 digests. Startup migrates legacy session rows once while preserving existing cookies. Historical backups or SQLite snapshots from before migration may still contain bearer tokens and are not sanitized by this change.
 - Revocable sessions on logout and password change
 - Input validation on all socket handlers and REST routes
 - Docker sandbox with `--network none`, memory cap and read-only filesystem for code execution
@@ -349,3 +354,7 @@ Make sure the backend is running and that `node_modules` is installed in both `b
 Built by [Luca](https://rg-dev.lat)
 
 </div>
+
+### Saving editor content
+
+Edits are written after 750 ms of inactivity or at a non-resetting 5-second deadline during continuous typing. Closing the last connection to a room and graceful shutdown flush pending edits immediately. Failed writes remain pending and are retried. These are timer targets, not a durability guarantee during database outages, event-loop stalls or abrupt process termination; unsaved edits can still be lost in a crash.

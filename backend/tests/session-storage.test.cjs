@@ -1,0 +1,58 @@
+const assert = require('node:assert/strict')
+const { test, after } = require('node:test')
+const { mkdtempSync, rmSync } = require('node:fs')
+const { tmpdir } = require('node:os')
+const path = require('node:path')
+const { createHash, randomBytes } = require('node:crypto')
+const Database = require('better-sqlite3')
+process.env.TS_NODE_PROJECT = path.resolve(__dirname, '../tsconfig.json')
+require('ts-node/register/transpile-only')
+const cwd = process.cwd()
+const dir = mkdtempSync(path.join(tmpdir(), 'coderoom-session-storage-'))
+process.chdir(dir)
+const token = () => randomBytes(32).toString('hex')
+const hash = value => createHash('sha256').update(value).digest('hex')
+const legacyToken = token()
+const expiry = Math.floor(Date.now() / 1000) + 3600
+const legacy = new Database('coderoom.db')
+legacy.exec(`CREATE TABLE users (id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL, created_at INTEGER NOT NULL DEFAULT (unixepoch()));
+  CREATE TABLE sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()), expires_at INTEGER NOT NULL);
+  INSERT INTO users (id,name,email,password_hash) VALUES ('owner','Owner','owner@example.com','password-hash');`)
+legacy.prepare('INSERT INTO sessions (id,user_id,expires_at) VALUES (?, ?, ?)').run(legacyToken, 'owner', expiry)
+legacy.close()
+let db = require('../src/db')
+after(() => { db.default.close(); process.chdir(cwd); rmSync(dir, { recursive: true, force: true }) })
+
+test('legacy session migration preserves cookies, stores only digests and is idempotent', () => {
+  assert.equal(db.dbGetSession(legacyToken).user_id, 'owner')
+  const row = db.default.prepare('SELECT * FROM sessions').get()
+  assert.equal(row.token_hash, hash(legacyToken))
+  assert.equal(row.id, undefined)
+  assert.equal(row.expires_at, expiry)
+  assert.equal(db.dbGetSession(row.token_hash), undefined)
+  db.default.close()
+  delete require.cache[require.resolve('../src/db')]
+  db = require('../src/db')
+  assert.equal(db.dbGetSession(legacyToken).token_hash, row.token_hash)
+})
+
+test('both session creation paths hash tokens and reject replay of the stored digest', () => {
+  const raw = token()
+  db.dbCreateSession(raw, 'owner', expiry)
+  assert.equal(db.dbGetSession(raw).token_hash, hash(raw))
+  assert.equal(db.dbGetSession(hash(raw)), undefined)
+  const login = token()
+  assert.equal(db.dbCreateSessionForCredentials(login, 'owner', expiry, 'owner@example.com', 'password-hash'), true)
+  assert.equal(db.dbGetSession(login).token_hash, hash(login))
+  assert.equal(db.dbGetSession(hash(login)), undefined)
+  assert.equal(db.dbCreateSessionForCredentials(token(), 'owner', expiry, 'owner@example.com', 'stale-hash'), false)
+  db.dbDeleteOtherSessions('owner', login)
+  assert.equal(db.dbGetSession(raw), undefined)
+  assert.ok(db.dbGetSession(login))
+  db.dbDeleteSession(hash(login))
+  assert.ok(db.dbGetSession(login))
+  db.dbDeleteSession(login)
+  assert.equal(db.dbGetSession(login), undefined)
+})

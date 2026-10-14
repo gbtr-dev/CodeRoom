@@ -199,7 +199,7 @@ test('signup: creates an unverified account, sends one email and creates NO sess
   const res = await post('/auth/signup', { name: 'Anna', email, password: 'secret123' })
 
   assert.equal(res.statusCode, 200)
-  assert.deepEqual(res.json(), { status: 'verification_required', email, emailSent: true })
+  assert.deepEqual(res.json(), { status: 'verification_required', email })
   assert.equal(res.headers['set-cookie'], undefined)
   assert.equal(res.json().user, undefined)
 
@@ -216,8 +216,8 @@ test('login: refused until the email is confirmed, then it works', async () => {
   await post('/auth/signup', { name: 'Luca', email, password: 'secret123' })
 
   const refused = await post('/auth/login', { email, password: 'secret123' })
-  assert.equal(refused.statusCode, 403)
-  assert.equal(refused.json().code, 'email_not_verified')
+  assert.equal(refused.statusCode, 401)
+  assert.equal(refused.json().error, 'Invalid email or password')
   assert.equal(refused.headers['set-cookie'], undefined)
 
   // a wrong password is still a plain 401: the 403 cannot be used to discover registered addresses
@@ -262,7 +262,7 @@ test('verify-email: a link works once, expired and garbage links are rejected', 
   }
 })
 
-test('signup again with an unconfirmed address: new data replace the old ones and a new email is sent', async () => {
+test('signup after preregistration activates only the credentials from the selected link', async () => {
   const email = uniqueEmail('replace')
   await post('/auth/signup', { name: 'Attacker', email, password: 'attacker-pass' })
   const id = db.dbGetUserByEmail(email).id
@@ -270,25 +270,25 @@ test('signup again with an unconfirmed address: new data replace the old ones an
 
   const res = await post('/auth/signup', { name: 'Real Owner', email, password: 'owner-pass-1' })
   assert.equal(res.statusCode, 200)
-  assert.equal(res.json().emailSent, true)
   assert.equal(sent.length, 2)
   assert.equal(db.dbGetUserByEmail(email).id, id)           // same row, not a duplicate
-  assert.equal(db.dbGetUserById(id).name, 'Real Owner')
+  assert.equal(db.dbGetUserById(id).name, 'Attacker')
 
-  assert.equal((await post('/auth/verify-email', { token: tokenFrom(sent[0]) })).statusCode, 400)
   assert.equal(db.dbGetUserById(id).email_verified_at, null)
-  await post('/auth/verify-email', { token: tokenFrom(sent[1]) })
+  assert.equal((await post('/auth/verify-email', { token: tokenFrom(sent[1]) })).statusCode, 200)
+  assert.equal(db.dbGetUserById(id).name, 'Real Owner')
+  assert.equal((await post('/auth/verify-email', { token: tokenFrom(sent[0]) })).statusCode, 400)
   assert.equal((await post('/auth/login', { email, password: 'attacker-pass' })).statusCode, 401)
   assert.equal((await post('/auth/login', { email, password: 'owner-pass-1' })).statusCode, 200)
 })
 
-test('signup with an already confirmed address is refused and changes nothing', async () => {
+test('signup with an already confirmed address gives a neutral response and changes nothing', async () => {
   const email = uniqueEmail('taken')
   await registerAndConfirm(email, 'original-pass')
   sent.length = 0
 
   const res = await post('/auth/signup', { name: 'Intruder', email, password: 'intruder-pass' })
-  assert.equal(res.statusCode, 409)
+  assert.equal(res.statusCode, 200)
   assert.equal(sent.length, 0)
   assert.equal((await post('/auth/login', { email, password: 'intruder-pass' })).statusCode, 401)
   assert.equal((await post('/auth/login', { email, password: 'original-pass' })).statusCode, 200)
@@ -300,29 +300,21 @@ test('signup right after another one: account saved, email held back by the cool
   const second = await post('/auth/signup', { name: 'Intruder', email, password: 'intruder-pass' })
 
   assert.equal(second.statusCode, 200)
-  assert.deepEqual(second.json(), { status: 'verification_required', email, emailSent: false, reason: 'cooldown' })
+  assert.deepEqual(second.json(), { status: 'verification_required', email })
   assert.equal(sent.length, 1)
   const oldLink = await post('/auth/verify-email', { token: tokenFrom(sent[0]) })
-  assert.equal(oldLink.statusCode, 400)
-  assert.equal(oldLink.json().code, 'invalid_token')
-  assert.equal(db.dbGetUserByEmail(email).email_verified_at, null)
-  assert.equal((await post('/auth/login', { email, password: 'intruder-pass' })).statusCode, 403)
-
-  // The owner can still start again and confirm their own credentials after the cooldown.
-  ageEmails()
-  const retry = await post('/auth/signup', { name: 'A', email, password: 'owner-pass' })
-  assert.equal(retry.json().emailSent, true)
-  assert.equal((await post('/auth/verify-email', { token: tokenFrom(sent[1]) })).statusCode, 200)
-  assert.equal((await post('/auth/login', { email, password: 'owner-pass' })).statusCode, 200)
+  assert.equal(oldLink.statusCode, 200)
+  assert.equal(db.dbGetUserByEmail(email).name, 'A')
+  assert.equal((await post('/auth/login', { email, password: 'secret123' })).statusCode, 200)
   assert.equal((await post('/auth/login', { email, password: 'intruder-pass' })).statusCode, 401)
 })
 
-test('signup: if the email provider fails the account is kept and the answer says so', async () => {
+test('signup: provider failure keeps the account and returns a neutral response', async () => {
   mail.setMailTransport(async () => { throw new Error('provider down') })
   const email = uniqueEmail('provider')
   const res = await post('/auth/signup', { name: 'P', email, password: 'secret123' })
   assert.equal(res.statusCode, 200)
-  assert.deepEqual(res.json(), { status: 'verification_required', email, emailSent: false, reason: 'failed' })
+  assert.deepEqual(res.json(), { status: 'verification_required', email })
   assert.ok(db.dbGetUserByEmail(email))
 })
 
@@ -508,4 +500,211 @@ test('accounts that existed before email verification (grandfathered) can still 
   db.dbCreateUser(id, 'Legacy', email, bcrypt.hashSync('old-password', 4), Math.floor(Date.now() / 1000) - 86400)
   const res = await post('/auth/login', { email, password: 'old-password' })
   assert.equal(res.statusCode, 200)
+})
+
+for (const failure of [false, true]) {
+  test(`later signup cannot invalidate the original link (provider failure: ${failure})`, async () => {
+    const email = uniqueEmail('preserve')
+    await post('/auth/signup', { name: 'Owner', email, password: 'owner-pass' })
+    const original = tokenFrom(sent[0])
+    ageEmails()
+    if (failure) mail.setMailTransport(async () => { throw new Error('provider down') })
+    const res = await post('/auth/signup', { name: 'Intruder', email, password: 'intruder-pass' })
+    assert.deepEqual(res.json(), { status: 'verification_required', email })
+    assert.equal((await post('/auth/verify-email', { token: original })).statusCode, 200)
+    assert.equal(db.dbGetUserByEmail(email).name, 'Owner')
+    assert.equal((await post('/auth/login', { email, password: 'owner-pass' })).statusCode, 200)
+    assert.equal((await post('/auth/login', { email, password: 'intruder-pass' })).statusCode, 401)
+    if (!failure) assert.equal((await post('/auth/verify-email', { token: tokenFrom(sent[1]) })).statusCode, 400)
+  })
+}
+
+
+test('failed logins lock only the attacking IP, survive restart, and ignore forged forwarding headers', async () => {
+  const email = uniqueEmail('ip-lock')
+  await registerAndConfirm(email)
+  const login = (ip, password, suppliedEmail = email, headers = {}) => app.inject({
+    method: 'POST', url: '/auth/login', remoteAddress: ip, headers,
+    payload: { email: suppliedEmail, password },
+  })
+  for (let i = 0; i < 5; i++) {
+    assert.equal((await login('198.51.100.10', 'wrong-password')).statusCode, 401)
+  }
+  const blocked = await login('198.51.100.10', 'secret123', email.toUpperCase(), { 'x-forwarded-for': '203.0.113.20' })
+  assert.equal(blocked.statusCode, 429)
+  assert.ok(Number(blocked.headers['retry-after']) > 0)
+  assert.equal(blocked.cookies.length, 0)
+  assert.equal((await login('203.0.113.20', 'secret123')).statusCode, 200)
+  assert.equal((await login('198.51.100.10', 'secret123')).statusCode, 429)
+  const modulePath = require.resolve('../src/authRateLimiter')
+  delete require.cache[modulePath]
+  const restarted = require(modulePath)
+  assert.ok(restarted.checkLoginLock(email, '198.51.100.10') > 0)
+  assert.equal(restarted.checkLoginLock(email, '203.0.113.20'), null)
+})
+
+test('legacy account-wide locks do not block owners; expired locks are removed', async () => {
+  const email = uniqueEmail('legacy-lock')
+  await registerAndConfirm(email)
+  const now = Math.floor(Date.now() / 1000)
+  db.dbUpsertLoginAttempt(email, 5, now, now + 600)
+  assert.equal((await post('/auth/login', { email, password: 'secret123' })).statusCode, 200)
+  db.dbUpsertLoginAttempt('expired-lock', 5, now - 1000, now - 1)
+  db.dbUpsertLoginAttempt('old-failures', 1, now - 1000, null)
+  db.dbDeleteExpiredLoginAttempts()
+  assert.equal(db.dbGetLoginAttempt('expired-lock'), undefined)
+  assert.equal(db.dbGetLoginAttempt('old-failures'), undefined)
+  assert.ok(db.dbGetLoginAttempt(email))
+})
+
+test('successful login resets only its own failure counter', async () => {
+  const email = uniqueEmail('reset-lock')
+  await registerAndConfirm(email)
+  for (let i = 0; i < 4; i++) assert.equal((await post('/auth/login', { email, password: 'wrong' })).statusCode, 401)
+  assert.equal((await post('/auth/login', { email, password: 'secret123' })).statusCode, 200)
+  for (let i = 0; i < 4; i++) assert.equal((await post('/auth/login', { email, password: 'wrong' })).statusCode, 401)
+  assert.equal((await post('/auth/login', { email, password: 'secret123' })).statusCode, 200)
+})
+
+test('the real login route retains its per-IP limit across different emails', async (t) => {
+  const limited = Fastify()
+  t.after(() => limited.close())
+  await limited.register(cookie)
+  await limited.register(require('@fastify/rate-limit'), { global: true, max: 1000, timeWindow: '1 minute' })
+  await registerAuthRoutes(limited)
+  for (let i = 0; i < 11; i++) {
+    const res = await limited.inject({ method: 'POST', url: '/auth/login', remoteAddress: '198.51.100.30',
+      payload: { email: uniqueEmail('unknown'), password: 'wrong' } })
+    assert.equal(res.statusCode, i < 10 ? 401 : 429)
+  }
+  const other = await limited.inject({ method: 'POST', url: '/auth/login', remoteAddress: '203.0.113.30',
+    payload: { email: uniqueEmail('unknown'), password: 'wrong' } })
+  assert.equal(other.statusCode, 401)
+})
+
+
+test('login locks expire without being extended by in-flight failures', () => {
+  const limiter = require('../src/authRateLimiter')
+  const email = uniqueEmail('expiry-lock')
+  const realNow = Date.now
+  const start = realNow()
+  try {
+    Date.now = () => start
+    for (let i = 0; i < 5; i++) limiter.recordLoginFailure(email, '198.51.100.40')
+    assert.equal(limiter.checkLoginLock(email, '198.51.100.40'), 600)
+    Date.now = () => start + 360000
+    limiter.recordLoginFailure(email, '198.51.100.40')
+    assert.equal(limiter.checkLoginLock(email, '198.51.100.40'), 240)
+    Date.now = () => start + 600000
+    assert.equal(limiter.checkLoginLock(email, '198.51.100.40'), null)
+  } finally {
+    Date.now = realNow
+  }
+})
+
+
+for (const password of ['a'.repeat(72), '\u00e9'.repeat(36), '\u{1f600}'.repeat(18)]) {
+  test(`72-byte password works without accepting a suffix (${password.length} code units)`, async () => {
+    const email = uniqueEmail('byte-boundary')
+    const user = await registerAndConfirm(email, password)
+    const login = await post('/auth/login', { email, password })
+    assert.equal(login.statusCode, 200)
+    const session = `${SESSION_COOKIE_NAME}=${sessionCookie(login).value}`
+    assert.equal((await post('/auth/login', { email, password: password + 'x' })).statusCode, 401)
+    assert.equal((await put('/auth/me/email', { email: uniqueEmail('target'), currentPassword: password + 'x' }, session)).statusCode, 401)
+    assert.equal((await put('/auth/me/password', { currentPassword: password + 'x', newPassword: 'replacement' }, session)).statusCode, 401)
+    assert.equal((await app.inject({ method: 'DELETE', url: '/auth/me', headers: { cookie: session }, payload: { password: password + 'x' } })).statusCode, 401)
+    assert.ok(db.dbGetUserById(user.id))
+    assert.equal((await put('/auth/me/password', { currentPassword: password, newPassword: password + 'x' }, session)).statusCode, 400)
+    assert.equal((await put('/auth/me/password', { currentPassword: password, newPassword: password }, session)).statusCode, 200)
+  })
+}
+
+test('signup rejects passwords over 72 UTF-8 bytes before creating accounts or sending mail', async () => {
+  for (const password of ['a'.repeat(73), '\u00e9'.repeat(37), '\u{1f600}'.repeat(19), 'a'.repeat(71) + '\u00e9']) {
+    const email = uniqueEmail('too-many-bytes')
+    const res = await post('/auth/signup', { name: 'Test', email, password })
+    assert.equal(res.statusCode, 400)
+    assert.match(res.json().error, /72 UTF-8 bytes/)
+    assert.equal(db.dbGetUserByEmail(email), undefined)
+  }
+  assert.equal(sent.length, 0)
+})
+
+test('shared bcrypt comparison rejects overlong ASCII and Unicode inputs for room and account checks', async () => {
+  const { comparePassword, fitsBcrypt } = require('../src/passwords')
+  for (const prefix of ['a'.repeat(72), '\u00e9'.repeat(36), '\u{1f600}'.repeat(18)]) {
+    const hash = await bcrypt.hash(prefix, 4)
+    assert.equal(await bcrypt.compare(prefix + 'suffix', hash), true) // reproduce the original bug
+    assert.equal(await comparePassword(prefix + 'suffix', hash), false)
+    assert.equal(await comparePassword(prefix, hash), true)
+    assert.equal(fitsBcrypt(prefix), true)
+  }
+  for (const invalid of [null, undefined, {}, 123]) assert.equal(await comparePassword(invalid, 'unused'), false)
+})
+
+
+test('signup responses and hashing work are identical for new, pending and verified addresses', async t => {
+  const verified = uniqueEmail('enum-verified')
+  await registerAndConfirm(verified)
+  const original = bcrypt.hash
+  const costs = []
+  bcrypt.hash = async (password, cost) => { costs.push(cost); return original(password, cost) }
+  t.after(() => { bcrypt.hash = original })
+  const fresh = uniqueEmail('enum-fresh')
+  for (const email of [fresh, fresh, verified]) {
+    const res = await post('/auth/signup', { name: 'Attempt', email, password: 'chosen-pass' })
+    assert.equal(res.statusCode, 200)
+    assert.deepEqual(res.json(), { status: 'verification_required', email })
+    assert.equal(res.cookies.length, 0)
+    const login = await post('/auth/login', { email, password: 'chosen-pass' })
+    assert.equal(login.statusCode, 401)
+    assert.deepEqual(login.json(), { error: 'Invalid email or password' })
+  }
+  assert.deepEqual(costs, [10, 10, 10])
+})
+
+test('unknown and known emails perform the same bcrypt cost before rejecting login', async t => {
+  const email = uniqueEmail('enum-cost')
+  await registerAndConfirm(email)
+  const original = bcrypt.compare
+  const costs = []
+  bcrypt.compare = async (password, hash) => { costs.push(bcrypt.getRounds(hash)); return original(password, hash) }
+  t.after(() => { bcrypt.compare = original })
+  const known = await post('/auth/login', { email, password: 'wrong-password' })
+  const unknown = await post('/auth/login', { email: uniqueEmail('unknown-cost'), password: 'wrong-password' })
+  assert.equal(known.statusCode, unknown.statusCode)
+  assert.deepEqual(known.json(), unknown.json())
+  assert.deepEqual(costs, [10, 10])
+})
+
+test('signup response does not wait for email delivery or expose provider failure', async () => {
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  let completed = false
+  mail.setMailTransport(async () => { await gate; completed = true; throw new Error('delayed provider failure') })
+  const email = uniqueEmail('enum-delayed')
+  try {
+    const result = await Promise.race([
+      post('/auth/signup', { name: 'Test', email, password: 'secret123' }),
+      new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error('signup waited for mail')), 3000); timer.unref() }),
+    ])
+    assert.equal(completed, false)
+    assert.equal(result.statusCode, 200)
+    assert.deepEqual(result.json(), { status: 'verification_required', email })
+  } finally {
+    release()
+    await new Promise(resolve => setImmediate(resolve))
+  }
+})
+
+
+test('GET preview of a verification link never consumes the token', async () => {
+  const email = uniqueEmail('scanner-preview')
+  await post('/auth/signup', { name: 'Preview', email, password: 'secret123' })
+  const token = tokenFrom(sent.at(-1))
+  const preview = await app.inject({ method: 'GET', url: `/auth/verify-email?token=${encodeURIComponent(token)}` })
+  assert.equal(preview.statusCode, 404)
+  assert.equal(db.dbGetUserByEmail(email).email_verified_at, null)
+  assert.equal((await post('/auth/verify-email', { token })).statusCode, 200)
 })

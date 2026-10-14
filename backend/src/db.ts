@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3'
+import { createHash } from 'crypto'
 import path from 'path'
 
 const DB_PATH = path.join(process.cwd(), 'coderoom.db')
@@ -47,12 +48,9 @@ db.exec(`
     FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE
   );
 
-  -- Sessioni di login: 'id' è il token opaco generato lato server e usato
-  -- come valore del cookie httpOnly. Niente JWT: la validità di un token
-  -- si verifica con una lookup qui, il che rende le sessioni revocabili
-  -- (logout, cambio password) — cosa impossibile con un JWT stateless.
+  -- Only SHA-256 digests of random session tokens are persisted.
   CREATE TABLE IF NOT EXISTS sessions (
-    id TEXT PRIMARY KEY,
+    token_hash TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
     expires_at INTEGER NOT NULL,
@@ -76,7 +74,7 @@ db.exec(`
   -- users.email already has an implicit unique index from the UNIQUE
   -- constraint above, so no extra index is needed there.
 
-  -- sessions is looked up by its PK (id, the opaque token) on every
+  -- sessions is looked up by its PK (token_hash) on every
   -- authenticated request, and scanned by user_id on logout-all/password
   -- change and by expires_at during cleanup.
   CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
@@ -127,6 +125,22 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_email_verifications_created ON email_verifications(created_at);
 `)
 
+function hashSessionToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex')
+}
+
+// The column name is the migration marker: never rehash digests on restart.
+// Preserve existing cookies while removing bearer tokens from the live table.
+db.transaction(() => {
+  const columns = db.prepare('PRAGMA table_info(sessions)').all() as { name: string }[]
+  if (!columns.some(c => c.name === 'id')) return
+  db.pragma('secure_delete = ON')
+  const sessions = db.prepare('SELECT id FROM sessions').all() as { id: string }[]
+  db.exec('ALTER TABLE sessions RENAME COLUMN id TO token_hash')
+  const update = db.prepare('UPDATE sessions SET token_hash = ? WHERE token_hash = ?')
+  for (const session of sessions) update.run(hashSessionToken(session.id), session.id)
+}).immediate()
+
 // Migration: add `avatar` column to users table if it doesn't exist yet
 const userColumns = db.prepare(`PRAGMA table_info(users)`).all() as { name: string }[]
 if (!userColumns.some((c) => c.name === 'avatar')) {
@@ -142,6 +156,19 @@ if (!userColumns.some((c) => c.name === 'email_verified_at')) {
     db.exec(`ALTER TABLE users ADD COLUMN email_verified_at INTEGER`)
     db.exec(`UPDATE users SET email_verified_at = created_at WHERE email_verified_at IS NULL`)
   })()
+}
+
+// Bind existing and future signup links to their own credential snapshot.
+const verificationColumns = db.prepare('PRAGMA table_info(email_verifications)').all() as { name: string }[]
+if (!verificationColumns.some(c => c.name === 'signup_name')) {
+  db.transaction(() => {
+    db.exec(`ALTER TABLE email_verifications ADD COLUMN signup_name TEXT`)
+    db.exec(`ALTER TABLE email_verifications ADD COLUMN signup_password_hash TEXT`)
+    db.exec(`UPDATE email_verifications SET
+      signup_name = (SELECT name FROM users WHERE id = user_id),
+      signup_password_hash = (SELECT password_hash FROM users WHERE id = user_id)
+      WHERE purpose = 'signup' AND used_at IS NULL`)
+  }).immediate()
 }
 
 // Migration: add `name` and `password_hash` columns to rooms table if they don't exist yet
@@ -253,8 +280,8 @@ const stmtUpdateUserPassword = db.prepare('UPDATE users SET password_hash = ? WH
 const stmtPasswordMatches = db.prepare('SELECT 1 FROM users WHERE id = ? AND password_hash = ?')
 const stmtDeleteUserById = db.prepare('DELETE FROM users WHERE id = ?')
 const stmtMarkUserVerified = db.prepare('UPDATE users SET email_verified_at = ? WHERE id = ?')
-const stmtReplaceUnverifiedUser = db.prepare(`
-  UPDATE users SET name = ?, password_hash = ?, created_at = unixepoch()
+const stmtApplySignupCredentials = db.prepare(`
+  UPDATE users SET name = ?, password_hash = ?
   WHERE id = ? AND email_verified_at IS NULL
 `)
 const stmtSelectStaleUnverifiedUsers = db.prepare(
@@ -262,11 +289,11 @@ const stmtSelectStaleUnverifiedUsers = db.prepare(
 )
 
 const stmtInsertEmailVerification = db.prepare(`
-  INSERT INTO email_verifications (token_hash, user_id, email, purpose, expires_at, created_at)
-  VALUES (?, ?, ?, ?, ?, ?)
+  INSERT INTO email_verifications (token_hash, user_id, email, purpose, expires_at, created_at, signup_name, signup_password_hash)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 `)
 const stmtGetEmailVerification = db.prepare(`
-  SELECT token_hash, user_id, email, purpose, expires_at, used_at
+  SELECT token_hash, user_id, email, purpose, expires_at, used_at, signup_name, signup_password_hash
   FROM email_verifications WHERE token_hash = ?
 `)
 const stmtMarkEmailVerificationUsed = db.prepare(
@@ -297,21 +324,21 @@ const stmtDeleteNonOwnerMemberships = db.prepare(
 
 // Sessions
 const stmtInsertSession = db.prepare(`
-  INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)
+  INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)
 `)
 const stmtInsertSessionForCredentials = db.prepare(`
-  INSERT INTO sessions (id, user_id, expires_at)
+  INSERT INTO sessions (token_hash, user_id, expires_at)
   SELECT ?, id, ? FROM users
   WHERE id = ? AND email = ? AND password_hash = ? AND email_verified_at IS NOT NULL
 `)
-const stmtSelectSession = db.prepare('SELECT id, user_id, created_at, expires_at FROM sessions WHERE id = ?')
-const stmtDeleteSessionById = db.prepare('DELETE FROM sessions WHERE id = ?')
+const stmtSelectSession = db.prepare('SELECT token_hash, user_id, created_at, expires_at FROM sessions WHERE token_hash = ?')
+const stmtDeleteSessionById = db.prepare('DELETE FROM sessions WHERE token_hash = ?')
 const stmtDeleteSessionsByUser = db.prepare('DELETE FROM sessions WHERE user_id = ?')
-const stmtDeleteOtherSessions = db.prepare('DELETE FROM sessions WHERE user_id = ? AND id != ?')
+const stmtDeleteOtherSessions = db.prepare('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?')
 const stmtDeleteExpiredSessions = db.prepare('DELETE FROM sessions WHERE expires_at <= ?')
 const stmtPruneUserSessions = db.prepare(`
-  DELETE FROM sessions WHERE user_id = ? AND id NOT IN (
-    SELECT id FROM sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT 10
+  DELETE FROM sessions WHERE user_id = ? AND token_hash NOT IN (
+    SELECT token_hash FROM sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT 10
   )
 `)
 
@@ -324,7 +351,7 @@ const stmtUpsertLoginAttempt = db.prepare(`
 `)
 const stmtDeleteLoginAttempt = db.prepare('DELETE FROM login_attempts WHERE email = ?')
 const stmtDeleteExpiredLoginAttempts = db.prepare(
-  'DELETE FROM login_attempts WHERE locked_until IS NULL AND first_attempt_at < ?'
+  'DELETE FROM login_attempts WHERE (locked_until IS NULL AND first_attempt_at < ?) OR locked_until <= ?'
 )
 
 // Invites
@@ -560,12 +587,21 @@ export function dbCreateEmailVerification(
   expiresAt: number,
   createdAt: number = Math.floor(Date.now() / 1000),
   expectedPasswordHash?: string,
+  signupCredentials?: { name: string; passwordHash: string },
 ) {
   return db.transaction(() => {
     // Serialize this check with password updates, including other DB connections.
     if (expectedPasswordHash !== undefined && !stmtPasswordMatches.get(userId, expectedPasswordHash)) return false
+    let snapshot = null
+    if (purpose === 'signup') {
+      const user = stmtSelectUserByEmail.get(email) as { id: string; name: string; password_hash: string; email_verified_at: number | null } | undefined
+      if (!user || user.id !== userId || user.email_verified_at !== null) return false
+      snapshot = signupCredentials ?? { name: user.name, passwordHash: user.password_hash }
+    }
     if (purpose === 'change') stmtSupersedePendingChanges.run(createdAt, userId)
-    stmtInsertEmailVerification.run(tokenHash, userId, email, purpose, expiresAt, createdAt)
+    stmtInsertEmailVerification.run(tokenHash, userId, email, purpose, expiresAt, createdAt, snapshot?.name ?? null, snapshot?.passwordHash ?? null)
+    // Keep the placeholder alive for the full lifetime of newly issued signup links.
+    if (purpose === 'signup') db.prepare('UPDATE users SET created_at = MAX(created_at, ?) WHERE id = ?').run(createdAt, userId)
     return true
   }).immediate()
 }
@@ -581,16 +617,17 @@ export function dbConsumeEmailVerification(tokenHash: string): EmailVerification
   const tx = db.transaction((hash: string): EmailVerificationResult => {
     const now = Math.floor(Date.now() / 1000)
     const row = stmtGetEmailVerification.get(hash) as {
-      user_id: string; email: string; purpose: EmailVerificationPurpose; expires_at: number; used_at: number | null
+      user_id: string; email: string; purpose: EmailVerificationPurpose; expires_at: number; used_at: number | null; signup_name: string | null; signup_password_hash: string | null
     } | undefined
     if (!row || row.used_at !== null) return { status: 'invalid' }
     if (row.expires_at <= now) return { status: 'expired' }
 
-    const user = stmtSelectUserById.get(row.user_id) as { email: string } | undefined
+    const user = stmtSelectUserById.get(row.user_id) as { email: string; email_verified_at: number | null } | undefined
     if (!user) return { status: 'invalid' }
 
     if (row.purpose === 'signup') {
-      if (user.email !== row.email) return { status: 'invalid' }
+      if (user.email !== row.email || user.email_verified_at !== null || row.signup_name === null || row.signup_password_hash === null) return { status: 'invalid' }
+      stmtApplySignupCredentials.run(row.signup_name, row.signup_password_hash, row.user_id)
     } else {
       const owner = stmtSelectUserByEmail.get(row.email) as { id: string } | undefined
       if (owner && owner.id !== row.user_id) return { status: 'conflict' }
@@ -602,7 +639,7 @@ export function dbConsumeEmailVerification(tokenHash: string): EmailVerification
     stmtClosePendingVerifications.run(now, row.user_id)
     return { status: 'ok', userId: row.user_id, email: row.email, purpose: row.purpose }
   })
-  return tx(tokenHash)
+  return tx.immediate(tokenHash)
 }
 
 /** How many verification emails were created for this address since `sinceSec`, and when the last one was. */
@@ -614,17 +651,6 @@ export function dbGetEmailVerificationStats(email: string, sinceSec: number): { 
 /** How many verification emails were created by anyone since `sinceSec` (daily sending cap). */
 export function dbCountEmailVerificationsSince(sinceSec: number): number {
   return (stmtCountVerificationsSince.get(sinceSec) as { n: number }).n
-}
-
-/** Re-signup with the email of an account that never confirmed it: new name/password, fresh 48 h window. */
-export function dbReplaceUnverifiedUser(userId: string, name: string, passwordHash: string): boolean {
-  return db.transaction(() => {
-    if (stmtReplaceUnverifiedUser.run(name, passwordHash, userId).changes === 0) return false
-    // An earlier email must never confirm credentials supplied by a later signup.
-    // Keep the rows for sending limits, and revoke them even if the new email cannot be sent.
-    stmtClosePendingVerifications.run(Math.floor(Date.now() / 1000), userId)
-    return true
-  })()
 }
 
 /** Deletes accounts that were never verified and are older than `olderThanSec`. Returns how many. */
@@ -731,7 +757,7 @@ export function dbRemoveMember(userId: string, roomId: string) {
 /* ------------------------------------------------------------------ */
 
 export function dbCreateSession(token: string, userId: string, expiresAt: number) {
-  stmtInsertSession.run(token, userId, expiresAt)
+  stmtInsertSession.run(hashSessionToken(token), userId, expiresAt)
   stmtPruneUserSessions.run(userId, userId)
 }
 
@@ -742,7 +768,7 @@ export function dbCreateSessionForCredentials(
   return db.transaction(() => {
     // The check is part of the write, so another DB connection cannot replace credentials
     // between validating them and creating the session.
-    const inserted = stmtInsertSessionForCredentials.run(token, expiresAt, userId, email, passwordHash)
+    const inserted = stmtInsertSessionForCredentials.run(hashSessionToken(token), expiresAt, userId, email, passwordHash)
     if (inserted.changes === 0) return false
     stmtPruneUserSessions.run(userId, userId)
     return true
@@ -750,17 +776,17 @@ export function dbCreateSessionForCredentials(
 }
 
 export function dbGetSession(token: string) {
-  return stmtSelectSession.get(token) as {
-    id: string; user_id: string; created_at: number; expires_at: number
+  return stmtSelectSession.get(hashSessionToken(token)) as {
+    token_hash: string; user_id: string; created_at: number; expires_at: number
   } | undefined
 }
 
 export function dbDeleteSession(token: string) {
-  stmtDeleteSessionById.run(token)
+  stmtDeleteSessionById.run(hashSessionToken(token))
 }
 
 export function dbDeleteOtherSessions(userId: string, keepToken: string) {
-  stmtDeleteOtherSessions.run(userId, keepToken)
+  stmtDeleteOtherSessions.run(userId, hashSessionToken(keepToken))
 }
 
 export function dbDeleteSessionsByUser(userId: string) {
@@ -792,7 +818,7 @@ export function dbDeleteLoginAttempt(email: string) {
 
 export function dbDeleteExpiredLoginAttempts() {
   const windowAgo = Math.floor(Date.now() / 1000) - 5 * 60
-  stmtDeleteExpiredLoginAttempts.run(windowAgo)
+  stmtDeleteExpiredLoginAttempts.run(windowAgo, Math.floor(Date.now() / 1000))
 }
 
 // Invites

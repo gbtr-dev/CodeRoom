@@ -15,7 +15,7 @@ import {
 import { executeCode, formatCode } from './executor'
 import { dbRoomExists, dbAddRoomMember, dbCreateRoom, dbCreateRoomWithOwner, dbGetUserById, dbSetRoomName, dbGetRoom, dbGetMemberRole, dbSetMemberRole, dbGetRoomMembers, dbRemoveMember, dbRenameFile, dbMoveFile, dbSaveChatMessage, dbGetChatMessages, type RoomRole } from './db'
 import { verifySessionToken, SESSION_COOKIE_NAME } from './auth'
-import bcrypt from 'bcryptjs'
+import { comparePassword } from './passwords'
 import { createLogger, maskEmail } from './logger'
 import { checkRateLimit } from './rateLimiter'
 import { workloadLimit, connectionLimit } from './workloadLimits'
@@ -362,7 +362,7 @@ export function registerSocketHandlers(io: Server) {
               socket.emit('room-password-required')
               return
             }
-            const valid = await bcrypt.compare(password, roomRow.password_hash)
+            const valid = await comparePassword(password, roomRow.password_hash)
             if (!isCurrentAttempt(attempt)) return
             if (!valid) {
               socket.emit('room-wrong-password')
@@ -385,7 +385,7 @@ export function registerSocketHandlers(io: Server) {
           socket.emit('room-password-required')
           return
         }
-        const valid = await bcrypt.compare(password, roomRow.password_hash)
+        const valid = await comparePassword(password, roomRow.password_hash)
         if (!isCurrentAttempt(attempt)) return
         if (!valid) {
           socket.emit('room-wrong-password')

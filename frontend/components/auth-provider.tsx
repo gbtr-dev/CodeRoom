@@ -13,11 +13,9 @@ export type User = {
   avatar?: string | null
 }
 
-/** Returned by signup: the account exists but its email address still has to be confirmed. */
+/** Neutral signup acknowledgement; does not disclose account or delivery status. */
 export type PendingVerification = {
   email: string
-  emailSent: boolean
-  reason?: "cooldown" | "hourly" | "daily" | "failed"
 }
 
 export type VerifyEmailResult =
@@ -89,7 +87,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (!res.ok) return { error: data.error ?? "Signup failed" }
       // The account must be confirmed by email before it can be used: there is no session yet
       if (data.status === "verification_required") {
-        return { pending: { email: data.email, emailSent: !!data.emailSent, reason: data.reason } }
+        return { pending: { email: data.email } }
       }
       // Older backend (no email confirmation): the user is signed in right away
       setUser({ ...data.user, avatar: sanitizeAvatar(data.user.avatar) })

@@ -81,6 +81,7 @@ export async function sendVerificationEmail(params: {
   email: string
   purpose: EmailVerificationPurpose
   expectedPasswordHash?: string
+  signupCredentials?: { name: string; passwordHash: string }
 }): Promise<SendVerificationResult> {
   const { userId, name, email, purpose } = params
   const nowSec = Math.floor(Date.now() / 1000)
@@ -92,7 +93,7 @@ export async function sendVerificationEmail(params: {
   }
 
   const { token, hash } = generateVerificationToken()
-  const created = dbCreateEmailVerification(hash, userId, email, purpose, nowSec + VERIFICATION_TTL_SECONDS, nowSec, params.expectedPasswordHash)
+  const created = dbCreateEmailVerification(hash, userId, email, purpose, nowSec + VERIFICATION_TTL_SECONDS, nowSec, params.expectedPasswordHash, params.signupCredentials)
   if (!created) return { status: 'stale_credentials' }
 
   const link = `${getMailConfig().appUrl}/verify-email?token=${token}`

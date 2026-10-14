@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto'
 import { LIMITS } from './validation'
+import { createLogger } from './logger'
 import {
   dbGetFiles,
   dbCreateFile,
@@ -40,9 +41,12 @@ function pickColor(room: Room): string {
 }
 
 const DB_FLUSH_MS = 750
+const DB_MAX_FLUSH_MS = 5_000
+const log = createLogger('ROOM-SAVE')
 
 const dirtyFiles = new Set<string>()
 const flushTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const deadlineTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const fileRoomIndex = new Map<string, string>()
 
 function getLangFromName(name: string): string {
@@ -66,41 +70,57 @@ function ensureCacheLoaded(room: Room, rows?: ReturnType<typeof dbGetFiles>) {
   room.cacheLoaded = true
 }
 
-function cancelPendingFlush(fileId: string) {
+function clearFlushTimers(fileId: string) {
   const timer = flushTimers.get(fileId)
-  if (timer) {
-    clearTimeout(timer)
-    flushTimers.delete(fileId)
-  }
+  if (timer) clearTimeout(timer)
+  flushTimers.delete(fileId)
+  const deadline = deadlineTimers.get(fileId)
+  if (deadline) clearTimeout(deadline)
+  deadlineTimers.delete(fileId)
+}
+
+function cancelPendingFlush(fileId: string) {
+  clearFlushTimers(fileId)
   dirtyFiles.delete(fileId)
 }
 
 function flushFileToDb(fileId: string) {
-  cancelPendingFlush(fileId)
+  clearFlushTimers(fileId)
   const roomId = fileRoomIndex.get(fileId)
-  if (!roomId) return
-  const room = rooms.get(roomId)
-  const content = room?.fileContent.get(fileId)
-  if (content === undefined) return
-  dbUpdateFileContent(fileId, roomId, content)
+  const content = roomId ? rooms.get(roomId)?.fileContent.get(fileId) : undefined
+  if (!roomId || content === undefined) {
+    dirtyFiles.delete(fileId)
+    return
+  }
+  try {
+    dbUpdateFileContent(fileId, roomId, content)
+    dirtyFiles.delete(fileId)
+  } catch (error) {
+    // Keep unsaved content dirty and retry; a failed write must not silently lose it.
+    scheduleDbFlush(fileId, roomId)
+    throw error
+  }
 }
 
 function scheduleDbFlush(fileId: string, roomId: string) {
   dirtyFiles.add(fileId)
   fileRoomIndex.set(fileId, roomId)
 
+  const save = () => {
+    if (!dirtyFiles.has(fileId)) return
+    try {
+      flushFileToDb(fileId)
+    } catch (error) {
+      log.error('File save failed; retry scheduled', { fileId, roomId, error: String(error) })
+    }
+  }
   const existing = flushTimers.get(fileId)
   if (existing) clearTimeout(existing)
-
-  flushTimers.set(fileId, setTimeout(() => {
-    flushTimers.delete(fileId)
-    if (!dirtyFiles.has(fileId)) return
-    dirtyFiles.delete(fileId)
-    const room = rooms.get(roomId)
-    const content = room?.fileContent.get(fileId)
-    if (content === undefined) return
-    dbUpdateFileContent(fileId, roomId, content)
-  }, DB_FLUSH_MS))
+  flushTimers.set(fileId, setTimeout(save, DB_FLUSH_MS))
+  // Unlike the idle timer, this deadline never moves when more edits arrive.
+  if (!deadlineTimers.has(fileId)) {
+    deadlineTimers.set(fileId, setTimeout(save, DB_MAX_FLUSH_MS))
+  }
 }
 
 export function flushRoomContent(roomId: string) {

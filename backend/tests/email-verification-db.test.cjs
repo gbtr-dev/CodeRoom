@@ -160,47 +160,36 @@ test('sending stats: per-address count and last send, plus the global count', ()
   assert.equal(db.dbGetEmailVerificationStats('stats@example.com', t - 3600).count, 2)
 })
 
-test('re-signup replaces an unverified account but never a verified one', () => {
-  const unverified = newUser('replace@example.com')
-  assert.equal(db.dbReplaceUnverifiedUser(unverified, 'New Name', 'new-hash'), true)
-  assert.equal(db.dbGetUserById(unverified).name, 'New Name')
-  assert.equal(db.dbGetUserByEmail('replace@example.com').password_hash, 'new-hash')
-
-  const verified = newUser('keep@example.com', now())
-  assert.equal(db.dbReplaceUnverifiedUser(verified, 'Hacker', 'evil-hash'), false)
-  assert.equal(db.dbGetUserById(verified).name, 'Test')
-  assert.equal(db.dbGetUserByEmail('keep@example.com').password_hash, 'hash')
-})
-
-test('re-signup invalidates existing links without resetting sending limits', () => {
-  const email = 'replace-links@example.com'
+test('signup snapshots preserve earlier links and sending limits; first confirmation wins', () => {
+  const email = 'snapshots@example.com'
   const id = newUser(email)
-  db.dbCreateEmailVerification('replace-old-a', id, email, 'signup', now() + 3600)
-  db.dbCreateEmailVerification('replace-old-b', id, email, 'signup', now() + 3600)
-  assert.equal(db.dbReplaceUnverifiedUser(id, 'Replacement', 'replacement-hash'), true)
-  assert.equal(db.dbConsumeEmailVerification('replace-old-a').status, 'invalid')
-  assert.equal(db.dbConsumeEmailVerification('replace-old-b').status, 'invalid')
-  assert.equal(db.dbGetUserById(id).email_verified_at, null)
+  db.dbCreateEmailVerification('snapshot-a', id, email, 'signup', now() + 3600)
+  db.dbCreateEmailVerification('snapshot-b', id, email, 'signup', now() + 3600, now(), undefined, { name: 'New', passwordHash: 'new-hash' })
+  assert.equal(db.dbGetUserByEmail(email).password_hash, 'hash')
   assert.equal(db.dbGetEmailVerificationStats(email, now() - 3600).count, 2)
-  db.dbCreateEmailVerification('replace-new', id, email, 'signup', now() + 3600)
-  assert.equal(db.dbConsumeEmailVerification('replace-new').status, 'ok')
+  assert.equal(db.dbConsumeEmailVerification('snapshot-a').status, 'ok')
+  assert.equal(db.dbConsumeEmailVerification('snapshot-b').status, 'invalid')
+  assert.equal(db.dbGetUserByEmail(email).password_hash, 'hash')
+  assert.equal(db.dbCreateEmailVerification('snapshot-late', id, email, 'signup', now() + 3600), false)
 })
 
-test('re-signup rolls back credentials if token invalidation fails', () => {
-  const email = 'replace-rollback@example.com'
+test('confirming a newer snapshot applies it atomically', () => {
+  const email = 'snapshot-rollback@example.com'
   const id = newUser(email)
-  db.dbCreateEmailVerification('replace-rollback', id, email, 'signup', now() + 3600)
+  db.dbCreateEmailVerification('snapshot-new', id, email, 'signup', now() + 3600, now(), undefined, { name: 'Owner', passwordHash: 'owner-hash' })
   db.default.exec(`CREATE TEMP TRIGGER fail_verification_invalidation
     BEFORE UPDATE OF used_at ON email_verifications
     BEGIN SELECT RAISE(ABORT, 'invalidation failed'); END`)
   try {
-    assert.throws(() => db.dbReplaceUnverifiedUser(id, 'Replacement', 'replacement-hash'), /invalidation failed/)
+    assert.throws(() => db.dbConsumeEmailVerification('snapshot-new'), /invalidation failed/)
     assert.equal(db.dbGetUserByEmail(email).password_hash, 'hash')
-    assert.equal(db.dbGetUserById(id).name, 'Test')
+    assert.equal(db.dbGetUserById(id).email_verified_at, null)
   } finally {
     db.default.exec('DROP TRIGGER fail_verification_invalidation')
   }
-  assert.equal(db.dbConsumeEmailVerification('replace-rollback').status, 'ok')
+  assert.equal(db.dbConsumeEmailVerification('snapshot-new').status, 'ok')
+  assert.equal(db.dbGetUserByEmail(email).password_hash, 'owner-hash')
+  assert.equal(db.dbGetUserById(id).name, 'Owner')
 })
 
 test('password update rolls back when pending email change revocation fails', () => {
@@ -225,7 +214,7 @@ test('cleanup: stale unverified accounts are deleted, verified and recent ones a
   const staleVerified = newUser('stale-verified@example.com', now() - 100)
   const recent = newUser('recent@example.com')
   raw.prepare('UPDATE users SET created_at = ? WHERE id IN (?, ?)').run(old, stale, staleVerified)
-  db.dbCreateEmailVerification('hash-stale', stale, 'stale@example.com', 'signup', now() + 3600)
+  db.dbCreateEmailVerification('hash-stale', stale, 'stale@example.com', 'signup', old + 3600, old)
 
   const deleted = db.dbDeleteStaleUnverifiedUsers(now() - 2 * 24 * 3600)
   assert.ok(deleted >= 1)
@@ -245,4 +234,47 @@ test('cleanup: old verification rows are purged by creation date', () => {
   assert.ok(db.dbDeleteOldEmailVerifications(t - 2 * 24 * 3600) >= 1)
   assert.equal(db.dbConsumeEmailVerification('hash-purge-old').status, 'invalid')
   assert.equal(db.dbConsumeEmailVerification('hash-purge-new').status, 'ok')
+})
+
+test('a newly issued signup link refreshes the pending account lifetime', () => {
+  const id = newUser('refresh@example.com')
+  db.default.prepare('UPDATE users SET created_at = ? WHERE id = ?').run(now() - 3 * 86400, id)
+  db.dbCreateEmailVerification('refresh-link', id, 'refresh@example.com', 'signup', now() + 86400)
+  db.dbDeleteStaleUnverifiedUsers(now() - 2 * 86400)
+  assert.equal(db.dbConsumeEmailVerification('refresh-link').status, 'ok')
+})
+
+test('migration preserves existing signup links and snapshots across restarts', () => {
+  const migrationDir = mkdtempSync(path.join(tmpdir(), 'coderoom-snapshot-migration-'))
+  const legacyDb = new Database(path.join(migrationDir, 'coderoom.db'))
+  legacyDb.exec(`
+    CREATE TABLE users (id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL, created_at INTEGER NOT NULL DEFAULT (unixepoch()), email_verified_at INTEGER);
+    INSERT INTO users (id, name, email, password_hash) VALUES ('pending', 'Original', 'migration@example.com', 'original-hash');
+    CREATE TABLE email_verifications (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
+      email TEXT NOT NULL, purpose TEXT NOT NULL, expires_at INTEGER NOT NULL, used_at INTEGER,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()));
+    INSERT INTO email_verifications (token_hash, user_id, email, purpose, expires_at)
+      VALUES ('old-link', 'pending', 'migration@example.com', 'signup', unixepoch() + 3600);
+  `)
+  legacyDb.close()
+  const script = `
+    require('ts-node/register/transpile-only');
+    const assert = require('node:assert/strict');
+    process.chdir(process.argv[1]);
+    const modulePath = process.argv[2];
+    let db = require(modulePath);
+    db.dbCreateEmailVerification('new-link', 'pending', 'migration@example.com', 'signup', Math.floor(Date.now()/1000)+3600,
+      undefined, undefined, {name:'Later', passwordHash:'later-hash'});
+    delete require.cache[require.resolve(modulePath)];
+    db = require(modulePath);
+    assert.equal(db.dbConsumeEmailVerification('old-link').status, 'ok');
+    assert.equal(db.dbGetUserByEmail('migration@example.com').password_hash, 'original-hash');
+    assert.equal(db.dbConsumeEmailVerification('new-link').status, 'invalid');
+  `
+  const result = require('node:child_process').spawnSync(process.execPath, ['-e', script, migrationDir, dbPath], {
+    cwd: path.resolve(__dirname, '..'), encoding: 'utf8', env: process.env,
+  })
+  assert.equal(result.status, 0, result.stderr)
+  rmSync(migrationDir, { recursive: true, force: true })
 })

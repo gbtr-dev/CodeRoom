@@ -246,8 +246,6 @@ function PasswordField({ value, onChange, showPw, onToggleShow, autoComplete }: 
 /* ------------------------------------------------------------------ */
 type PendingState = {
   email: string
-  emailSent: boolean
-  reason?: "cooldown" | "hourly" | "daily" | "failed"
   /** where the user came from: a fresh signup, or a sign-in attempt on an unconfirmed account */
   from: "signup" | "login"
 }
@@ -259,9 +257,9 @@ function CheckInbox({ pending, onResend, onBack }: {
   onResend: (email: string) => Promise<{ error?: string }>
   onBack: () => void
 }) {
-  const { email, emailSent, reason, from } = pending
+  const { email, from } = pending
   // The server holds back a second email for a minute, so the button waits as well
-  const [cooldown, setCooldown] = useState(from === "signup" && (emailSent || reason === "cooldown") ? RESEND_COOLDOWN_SECONDS : 0)
+  const [cooldown, setCooldown] = useState(from === "signup" ? RESEND_COOLDOWN_SECONDS : 0)
   const [sending, setSending] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -287,20 +285,14 @@ function CheckInbox({ pending, onResend, onBack }: {
 
   let heading = "Check your inbox"
   let body: React.ReactNode = (
-    <>We sent a confirmation link to <strong className="font-semibold text-[#d4d4d4] break-all">{email}</strong>. Open it to activate your account.</>
+    <>If registration can proceed, a confirmation link will be sent to <strong className="font-semibold text-[#d4d4d4] break-all">{email}</strong>. Open it to activate your account. If you already have an account, sign in. If no email arrives, try requesting a new link in a few minutes.</>
   )
   if (from === "login") {
     heading = "Confirm your email"
     body = (
       <><strong className="font-semibold text-[#d4d4d4] break-all">{email}</strong> hasn&apos;t been confirmed yet. Open the link we sent you, or ask for a new one.</>
     )
-  } else if (!emailSent) {
-    heading = "Almost there"
-    body = reason === "cooldown"
-      ? <>We already sent a link to <strong className="font-semibold text-[#d4d4d4] break-all">{email}</strong> a moment ago. Check your inbox.</>
-      : reason === "hourly"
-        ? <>Too many emails were sent to this address. Please try again in a while.</>
-        : <>Your account was created, but we couldn&apos;t send the confirmation email right now. Try again in a few minutes.</>
+
   }
 
   return (
@@ -406,7 +398,7 @@ function LoginInner() {
       if (mode === "login") {
         const result = await login(email, password)
         if (result.code === "email_not_verified") {
-          setPending({ email: email.trim().toLowerCase(), emailSent: false, from: "login" })
+          setPending({ email: email.trim().toLowerCase(), from: "login" })
           return
         }
         if (result.error) { setError(result.error); return }
